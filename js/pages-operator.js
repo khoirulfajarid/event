@@ -25,7 +25,7 @@ function feedHtml(logs) {
 // --------------------------------------------------------------------------
 function pageOperator(params, query, rid) {
   Layout.app(skeleton(5), 'operator');
-  return Promise.all([API.call('operatorOverview'), API.call('listUsers')]).then(function (res) {
+  return API.swrAll([['operatorOverview', {}], ['listUsers', {}]], function (res) {
     if (!Router.alive(rid)) return;
     var d = res[0], users = res[1].users, st = d.settings;
     var mailUsed = d.email_kuota_sisa >= 0 ? Math.max(0, 100 - d.email_kuota_sisa) : 0;
@@ -46,7 +46,8 @@ function pageOperator(params, query, rid) {
       '<div class="row between wrap"><div class="row">' + icon('sliders') + '<div><h3>Mesin Sistem & Kontrol Kuota</h3><p class="small muted">Berlaku langsung ke seluruh ' + d.total_event + ' event tanpa ubah kode.</p></div></div><span class="badge b-blue">Runtime: V8</span></div>' +
       '<div class="q-box row between wrap"><div class="row-top">' + icon('mail') + '<div><div class="row"><b>Notifikasi Email Global</b>' + badge(st.EMAIL_NOTIF ? 'Aktif' : 'Nonaktif', st.EMAIL_NOTIF ? 'green' : 'gray') + '</div><p class="small muted">Konfirmasi daftar, hasil verifikasi, kode akses, dan kiriman sertifikat.</p></div></div><label class="switch"><input type="checkbox" data-set="EMAIL_NOTIF"' + (st.EMAIL_NOTIF ? ' checked' : '') + '><span></span></label></div>' +
       '<div class="q-box row between wrap"><div class="row-top">' + icon('award') + '<div><b>Lampirkan PDF Sertifikat di Email</b><p class="small muted">Nonaktifkan jika kuota email menipis — peserta tetap bisa unduh di portal.</p></div></div><label class="switch"><input type="checkbox" data-set="KIRIM_SERTIFIKAT_EMAIL"' + (st.KIRIM_SERTIFIKAT_EMAIL ? ' checked' : '') + '><span></span></label></div>' +
-      '<div class="grid-2"><div class="q-box stack-sm"><b>' + icon('zap', 'ic-sm') + ' Throttle Generate Sertifikat</b><p class="xs muted">Cegah batas eksekusi 6 menit saat sintesis PDF massal.</p><div class="segmented" data-seg="BATCH_SERTIFIKAT">' + [[10, 'Hemat 10'], [25, 'Standar 25'], [50, 'Cepat 50']].map(function (o) { return '<button class="' + (st.BATCH_SERTIFIKAT === o[0] ? 'active' : '') + '" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div>' +
+      '<div class="q-box stack-sm"><b>' + icon('key', 'ic-sm') + ' Mode Login Peserta</b><p class="xs muted">Perangkat tepercaya: kode diminta sekali per HP/laptop, selanjutnya login 1-tap. "Cukup email" paling praktis namun rawan titip absen.</p><div class="segmented" data-segs="LOGIN_PESERTA">' + [['perangkat', 'Perangkat tepercaya (disarankan)'], ['email', 'Cukup email'], ['kode', 'Selalu kode']].map(function (o) { return '<button class="' + (st.LOGIN_PESERTA === o[0] ? 'active' : '') + '" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div>' +
+      '<div class="grid-2"><div class="q-box stack-sm"><b>' + icon('award', 'ic-sm') + ' Sertifikat PDF</b><p class="xs muted">PDF dibuat di browser (persis pratinjau desain event), lalu diarsipkan ke Drive & dikirim ke email peserta.</p><a class="btn btn-secondary btn-sm" href="#/admin/sertifikat?tab=desain">' + icon('edit', 'ic-sm') + ' Buka Desain Sertifikat</a></div>' +
       '<div class="q-box stack-sm"><b>' + icon('qr', 'ic-sm') + ' Rotasi QR Dinamis</b><p class="xs muted">Semakin singkat, semakin sulit titip absen.</p><div class="segmented" data-seg="QR_ROTASI_DETIK">' + [[20, '20 dtk'], [30, '30 dtk'], [60, '60 dtk']].map(function (o) { return '<button class="' + (st.QR_ROTASI_DETIK === o[0] ? 'active' : '') + '" data-v="' + o[0] + '">' + o[1] + '</button>'; }).join('') + '</div></div></div>' +
       '<div class="grid-2"><div class="field"><label class="label">Nama penerbit (email & sertifikat)</label><input class="input" data-text="NAMA_PENERBIT" value="' + esc(st.NAMA_PENERBIT) + '"></div><div class="field"><label class="label">Prefix nomor sertifikat</label><input class="input mono" data-text="PREFIX_SERTIFIKAT" value="' + esc(st.PREFIX_SERTIFIKAT) + '" style="text-transform:uppercase"></div></div>' +
       '<div class="field"><label class="label">URL situs frontend (GitHub Pages)</label><div class="row"><input class="input" data-text="URL_FRONTEND" value="' + esc(st.URL_FRONTEND) + '" placeholder="https://username.github.io/sim-event/"><button class="btn btn-secondary btn-sm" id="use-url">Pakai URL ini</button></div><span class="hint">Dipakai untuk tautan di email & QR verifikasi pada sertifikat.</span></div>' +
@@ -64,6 +65,9 @@ function pageOperator(params, query, rid) {
       return API.act('saveSettings', { settings: patch }).catch(function (e) { errToast(e); Router.resolve(); });
     };
     $$('[data-set]').forEach(function (c) { on(c, 'change', function () { var p = {}; p[c.dataset.set] = c.checked; saveSetting(p).then(function () { if (c.dataset.set === 'MAINTENANCE' || c.dataset.set === 'EMAIL_NOTIF') Router.resolve(); }); }); });
+    $$('[data-segs]').forEach(function (g) {
+      $$('button', g).forEach(function (b) { on(b, 'click', function () { $$('button', g).forEach(function (x) { x.classList.toggle('active', x === b); }); var p = {}; p[g.dataset.segs] = b.dataset.v; saveSetting(p); }); });
+    });
     $$('[data-seg]').forEach(function (g) {
       $$('button', g).forEach(function (b) { on(b, 'click', function () { $$('button', g).forEach(function (x) { x.classList.toggle('active', x === b); }); var p = {}; p[g.dataset.seg] = +b.dataset.v; saveSetting(p); }); });
     });
@@ -142,7 +146,7 @@ function userModal(u, reload) {
 // --------------------------------------------------------------------------
 function pageOperatorAkun(params, query, rid) {
   Layout.app(skeleton(3), 'akun', { search: 'Cari nama atau email…' });
-  return API.call('listUsers').then(function (d) {
+  return API.swr('listUsers', {}, function (d) {
     if (!Router.alive(rid)) return;
     $('#page').innerHTML = adminHead('Operator <span>/</span> <b>Akun Panitia</b>', 'Akun Panitia & Operator', 'Pengelola tidak mendaftar sendiri — akun dibuat dan dikontrol Operator.', '<button class="btn btn-primary" id="u-add">' + icon('plus', 'ic-sm') + ' Tambah Akun</button>') +
       '<div class="card" id="u-table"></div>';
@@ -162,7 +166,7 @@ function pageOperatorAkun(params, query, rid) {
 // --------------------------------------------------------------------------
 function pageOperatorLog(params, query, rid) {
   Layout.app(skeleton(3), 'log', { search: 'Filter aktor, aksi, detail…' });
-  return API.call('listLog', { limit: 500 }).then(function (d) {
+  return API.swr('listLog', { limit: 500 }, function (d) {
     if (!Router.alive(rid)) return;
     var state = { page: 1 };
     $('#page').innerHTML = adminHead('Operator <span>/</span> <b>Log Aktivitas</b>', 'Log Aktivitas', 'Jejak audit otomatis seluruh tindakan penting (500 entri terbaru).', '<button class="btn btn-secondary" id="lg-exp">' + icon('download', 'ic-sm') + ' Ekspor CSV</button>') + '<div class="card" id="lg"></div>';

@@ -32,6 +32,7 @@
   Router.add('/admin/sesi', pageAdminSesi, { roles: ADMIN });
   Router.add('/admin/evaluasi', pageAdminEvaluasi, { roles: ADMIN });
   Router.add('/admin/sertifikat', pageAdminSertifikat, { roles: ADMIN });
+  Router.add('/admin/scanner', pageAdminScanner, { roles: ADMIN });
 
   // Operator
   Router.add('/operator', pageOperator, { roles: ['OPERATOR'] });
@@ -51,6 +52,8 @@
   document.addEventListener('DOMContentLoaded', function () {
     document.title = CFG.APP_NAME + ' — Sistem Informasi Manajemen Event';
     updateOnline();
+    // Bangunkan instance Apps Script lebih awal (cold start 1–3 dtk) — fire & forget
+    if (API.configured()) API.call('ping', {}, { noRedirect: true }).catch(function () {});
     Router.resolve();
   });
 })();

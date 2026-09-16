@@ -6,21 +6,35 @@
 
 var Portal = {
   data: null,
-  load: function () {
-    return API.call('pesertaStatus').then(function (d) {
+  /** Status peserta via cache SWR: berpindah menu portal terasa instan. */
+  load: function (cb, opt) {
+    return API.swr('pesertaStatus', {}, function (d, cached) {
       Portal.data = d;
-      // sinkronkan peran (CALON → PESERTA setelah lolos)
       var role = d.pendaftar.status_verifikasi === 'lolos' ? 'PESERTA' : 'CALON';
-      if (S.user && S.user.role !== role) { S.user.role = role; Store.set('user', S.user); }
-      return d;
-    });
+      if (S.user && S.user.role !== role) {
+        S.user.role = role; Store.set('user', S.user); Layout._shellKey = '';
+        if (!cached) return Router.resolve();
+      }
+      if (d.kartu) Store.set('kartu_' + d.pendaftar.id, { kartu: d.kartu, nama: d.pendaftar.nama, event: d.event.nama });
+      cb(d, cached);
+    }, opt);
   },
   head: function (d, crumb, title, sub) {
+    var regs = d.registrasi || [];
+    var switcher = regs.length > 1
+      ? '<div class="ctx-select">' + icon('calendar', 'ic-sm') + '<select class="select" id="reg-switch" aria-label="Pilih event">' +
+        regs.map(function (r) { return '<option value="' + esc(r.id) + '"' + (r.id === d.pendaftar.id ? ' selected' : '') + '>' + esc(r.event) + ' · ' + esc((STATUS_LABEL[r.status_verifikasi] || [''])[0]) + '</option>'; }).join('') + '</select></div>'
+      : '<span class="badge b-blue">' + icon('calendar', 'ic-sm') + ' ' + esc(d.event.nama) + '</span>';
+    setTimeout(function () {
+      on($('#reg-switch'), 'change', function () { S.setPid(this.value); Router.resolve(); });
+      on($('#btn-kartu'), 'click', function () { kartuModal(d); });
+    }, 0);
     return '<div class="page-head"><div class="grow"><div class="crumbs">Portal Peserta <span>/</span> <b>' + esc(crumb) + '</b></div>' +
-      '<div class="row wrap"><h1>' + esc(title) + '</h1><span class="badge b-blue">' + icon('calendar', 'ic-sm') + ' ' + esc(d.event.nama) + '</span></div>' +
+      '<div class="row wrap"><h1>' + esc(title) + '</h1>' + switcher + '</div>' +
       (sub ? '<p class="muted mt-8">' + sub + '</p>' : '') + '</div>' +
+      '<div class="row wrap">' + (d.kartu ? '<button class="btn btn-secondary" id="btn-kartu">' + icon('qr', 'ic-sm') + ' Kartu QR Saya</button>' : '') +
       '<div class="user-pill"><div class="right"><div class="bold row" style="justify-content:flex-end">' + esc(d.pendaftar.nama) + (d.pendaftar.status_verifikasi === 'lolos' ? ' <span style="color:var(--accent)">' + icon('checkCircle', 'ic-sm') + '</span>' : '') + '</div>' +
-      '<div class="xs muted mono">' + esc(d.pendaftar.id) + '</div></div><span class="avatar">' + esc(initials(d.pendaftar.nama)) + '</span></div></div>';
+      '<div class="xs muted mono">' + esc(d.pendaftar.id) + '</div></div><span class="avatar">' + esc(initials(d.pendaftar.nama)) + '</span></div></div></div>';
   },
   steps: function (d) {
     var st = d.pendaftar.status_verifikasi;
@@ -54,6 +68,17 @@ var Portal = {
   }
 };
 
+/** Kartu QR pribadi — ditunjukkan ke panitia pada Scanner Kios (tetap tampil walau offline). */
+function kartuModal(d) {
+  openModal({
+    title: 'Kartu QR Peserta',
+    body: '<div class="center stack" style="align-items:center"><div style="background:#fff;padding:14px;border-radius:14px;border:1px solid var(--border);width:min(78vw,300px)">' + qrSvg(d.kartu, 6) + '</div>' +
+      '<div><div class="bold" style="font-size:18px">' + esc(d.pendaftar.nama) + '</div><div class="small muted">' + esc(d.event.nama) + '</div><div class="xs muted mono mt-8">' + esc(d.pendaftar.id) + '</div></div>' +
+      '<div class="alert small" style="text-align:left">' + icon('info', 'ic-sm') + '<span>Tunjukkan QR ini ke petugas <b>Scanner Kios</b> di pintu masuk. Naikkan kecerahan layar agar terbaca cepat.</span></div></div>',
+    foot: '<button class="btn btn-primary" data-close>Tutup</button>'
+  });
+}
+
 function portalLocked(d, crumb, title, msg, cta) {
   return Portal.head(d, crumb, title) +
     '<div class="card card-pad narrow" style="max-width:640px"><div class="locked">' +
@@ -67,7 +92,7 @@ function portalLocked(d, crumb, title, msg, cta) {
 // --------------------------------------------------------------------------
 function pagePortal(params, query, rid) {
   Layout.app(skeleton(4), 'status', { subtitle: 'Portal Peserta' });
-  return Portal.load().then(function (d) {
+  return Portal.load(function (d) {
     if (!Router.alive(rid)) return;
     var st = d.pendaftar.status_verifikasi;
     var canEdit = st !== 'lolos' && st !== 'ditolak';
@@ -168,92 +193,132 @@ function loadScript(src) {
 
 function pageAbsensi(params, query, rid) {
   Layout.app(skeleton(3), 'absensi', { subtitle: 'Portal Peserta' });
-  return Portal.load().then(function (d) {
+  // Siapkan pemindai sejak awal (paralel dengan pemuatan data) agar kamera siap < 1 detik
+  var detectorReady = ('BarcodeDetector' in window)
+    ? window.BarcodeDetector.getSupportedFormats().then(function (f) { return f.indexOf('qr_code') > -1 ? new window.BarcodeDetector({ formats: ['qr_code'] }) : loadScript('js/vendor/jsQR.js').then(function () { return null; }); }).catch(function () { return loadScript('js/vendor/jsQR.js').then(function () { return null; }); })
+    : loadScript('js/vendor/jsQR.js').then(function () { return null; });
+
+  return Portal.load(function (d) {
     if (!Router.alive(rid)) return;
     if (d.pendaftar.status_verifikasi !== 'lolos') {
       $('#page').innerHTML = portalLocked(d, 'Absensi', 'Absensi Sesi', 'Absensi aktif setelah pendaftaran Anda lolos verifikasi panitia.', '<a class="btn btn-light" href="#/portal">Lihat Status Verifikasi</a>');
       return;
     }
-    var stream = null, loopTimer = null, processing = false, detector = null, deviceId = Store.get('cam_id', '');
+    var stream = null, loopTimer = null, busy = false, detector = null, deviceId = Store.get('cam_id', ''), lastText = '', lastAt = 0;
     var ab = d.absensi;
-    var active = ab.sesi.filter(function (s) { return s.status === 'buka' && !s.hadir; })[0] || ab.sesi.filter(function (s) { return !s.hadir; })[0];
+    var sesiById = {};
+    ab.sesi.forEach(function (x) { sesiById[x.id] = x; });
 
+    var activeSesi = function () { return ab.sesi.filter(function (x) { return x.status === 'buka' && !x.hadir; })[0] || ab.sesi.filter(function (x) { return !x.hadir; })[0]; };
     var sessionsHtml = function () {
-      return ab.sesi.map(function (s) {
-        var b = s.hadir ? '<span class="badge b-navy">' + icon('checkCircle', 'ic-sm') + ' Hadir</span>' : s.status === 'buka' ? statusBadge('buka', 'Sedang Dibuka') : badge('Belum Dibuka', 'gray');
-        return '<div class="session-card ' + (s.hadir ? 'ok' : '') + '"><div class="row between"><span class="xs muted" style="letter-spacing:.06em">SESI ' + esc(s.urutan) + '</span>' + b + '</div>' +
-          '<div class="bold mt-8">' + esc(s.nama) + '</div>' +
-          '<div class="small muted row mt-8">' + icon(s.hadir ? 'clock' : 'lock', 'ic-sm') + (s.hadir ? 'Tercatat ' + esc(fmtDateTime(s.waktu_scan)) : 'Scan hanya bisa saat panitia membuka sesi') + '</div></div>';
+      return ab.sesi.map(function (x) {
+        var b = x.hadir ? '<span class="badge b-navy">' + icon('checkCircle', 'ic-sm') + ' Hadir</span>' : x.status === 'buka' ? statusBadge('buka', 'Sedang Dibuka') : badge('Belum Dibuka', 'gray');
+        return '<div class="session-card ' + (x.hadir ? 'ok' : '') + '"><div class="row between"><span class="xs muted" style="letter-spacing:.06em">SESI ' + esc(x.urutan) + '</span>' + b + '</div>' +
+          '<div class="bold mt-8">' + esc(x.nama) + '</div>' +
+          '<div class="small muted row mt-8">' + icon(x.hadir ? 'clock' : 'lock', 'ic-sm') + (x.hadir ? 'Tercatat ' + esc(fmtDateTime(x.waktu_scan)) : 'Scan hanya bisa saat panitia membuka sesi') + '</div></div>';
       }).join('');
     };
+    var statusHtml = function () {
+      var persen = Math.min(100, pct(ab.hadir, ab.wajib));
+      return '<div class="row between"><div><div class="xs muted" style="letter-spacing:.06em">STATUS VALIDASI</div><h3>Kelayakan Sertifikat</h3></div><div class="right"><div class="kpi-value" style="margin:0">' + persen + '%</div><div class="xs muted">' + ab.hadir + ' dari ' + ab.wajib + ' sesi</div></div></div>' +
+        '<div class="progress lg navy"><span style="width:' + persen + '%"></span></div>' +
+        '<div class="alert small">' + icon('shieldCheck', 'ic-sm') + '<span>Wajib <b>' + ab.wajib + ' sesi</b> tervalidasi untuk membuka evaluasi & sertifikat.</span></div>' +
+        '<div class="stack-sm">' + sessionsHtml() + '</div>' +
+        (ab.hadir >= ab.wajib ? '<a class="btn btn-accent btn-block" href="#/portal/evaluasi">' + icon('star', 'ic-sm') + ' Lanjut Isi Evaluasi</a>' : '');
+    };
 
-    var persen = Math.min(100, pct(ab.hadir, ab.wajib));
-    $('#page').innerHTML = Portal.head(d, 'Absensi Sesi', 'Absensi Sesi', 'Scan QR dinamis yang ditampilkan panitia di lokasi untuk mencatat kehadiran Anda.') +
+    var act = activeSesi();
+    $('#page').innerHTML = Portal.head(d, 'Absensi Sesi', 'Absensi Sesi', 'Scan QR yang ditampilkan panitia — kehadiran tercatat dalam hitungan detik.') +
       '<div class="split"><div class="stack">' +
-      '<div class="card card-pad"><div class="row between wrap mb-16"><div class="row"><span class="pulse"></span><div><div class="xs muted" style="letter-spacing:.06em">SESI AKTIF</div><h3>' + esc(active ? active.nama : 'Semua sesi sudah tercatat') + '</h3></div></div>' +
+      '<div class="card card-pad"><div class="row between wrap mb-16"><div class="row"><span class="pulse"></span><div><div class="xs muted" style="letter-spacing:.06em">SESI AKTIF</div><h3 id="act-name">' + esc(act ? act.nama : 'Semua sesi sudah tercatat') + '</h3></div></div>' +
       '<span class="badge b-gray">' + icon('pin', 'ic-sm') + ' ' + esc(d.event.lokasi || '-') + '</span></div>' +
-      '<div class="scanner" id="scanner"><video id="cam" playsinline muted hidden></video><canvas id="cv" hidden></canvas>' +
+      '<div class="scanner" id="scanner"><video id="cam" playsinline muted autoplay hidden></video><canvas id="cv" hidden></canvas>' +
       '<div class="scan-frame" id="frame" hidden><i></i><i></i><i></i><i></i><div class="scan-line"></div></div>' +
       '<div class="scan-idle" id="idle"><div class="qr-ic">' + icon('qr', 'ic-xl') + '</div><div class="bold" style="font-size:16px">Arahkan ke QR Sesi</div><p class="small" style="color:#adc8f5;margin-top:4px">Pastikan kode berada di dalam bingkai</p>' +
-      '<button class="btn btn-light mt-16" id="btn-start">' + icon('camera', 'ic-sm') + ' Aktifkan Kamera</button></div>' +
+      '<button class="btn btn-light btn-lg mt-16" id="btn-start">' + icon('camera', 'ic-sm') + ' Mulai Scan</button></div>' +
+      '<div class="scan-result" id="scan-result" hidden></div>' +
       '<div class="scan-pill" id="pill" hidden><span class="pulse"></span> Kamera aktif — memindai…</div></div>' +
       '<div class="row wrap mt-16"><select class="select" id="cam-sel" style="flex:1 1 200px" aria-label="Pilih kamera"><option value="">Kamera belakang (default)</option></select>' +
       '<button class="btn btn-secondary btn-icon" id="btn-torch" title="Lampu kilat" hidden>' + icon('zap') + '</button>' +
       '<button class="btn btn-secondary" id="btn-manual">' + icon('keyboard', 'ic-sm') + ' Input Kode Manual</button>' +
       '<button class="btn btn-secondary" id="btn-stop" hidden>' + icon('x', 'ic-sm') + ' Matikan</button></div></div>' +
-      '<div class="card card-pad-sm row-top" style="background:var(--surface-alt)"><span class="section-icon" style="background:#fff">' + icon('shield') + '</span><div><b>QR Dinamis Terenkripsi</b><p class="small muted mt-8">QR di layar panitia berganti otomatis tiap beberapa detik. Tangkapan layar atau kode yang diteruskan akan kedaluwarsa dan ditolak sistem.</p></div></div>' +
+      (d.kartu ? '<div class="card card-pad-sm row between wrap"><div class="row-top"><span class="section-icon">' + icon('idCard') + '</span><div><b>Antrean panjang di pintu masuk?</b><p class="small muted mt-8">Tunjukkan <b>Kartu QR</b> Anda ke petugas Scanner Kios — tanpa perlu membuka kamera.</p></div></div><button class="btn btn-navy" id="btn-kartu2">' + icon('qr', 'ic-sm') + ' Tampilkan Kartu</button></div>' : '') +
       '</div><aside class="stack">' +
-      '<div class="card card-pad stack"><div class="row between"><div><div class="xs muted" style="letter-spacing:.06em">STATUS VALIDASI</div><h3>Kelayakan Sertifikat</h3></div><div class="right"><div class="kpi-value" style="margin:0">' + persen + '%</div><div class="xs muted">' + ab.hadir + ' dari ' + ab.wajib + ' sesi</div></div></div>' +
-      '<div class="progress lg navy"><span style="width:' + persen + '%"></span></div>' +
-      '<div class="alert small">' + icon('shieldCheck', 'ic-sm') + '<span>Wajib <b>' + ab.wajib + ' sesi</b> tervalidasi untuk membuka evaluasi & sertifikat.</span></div>' +
-      '<div class="stack-sm" id="sess-list">' + sessionsHtml() + '</div>' +
-      (ab.memenuhi ? '<a class="btn btn-accent btn-block" href="#/portal/evaluasi">' + icon('star', 'ic-sm') + ' Lanjut Isi Evaluasi</a>' : '') + '</div>' +
-      '<div class="card card-pad-sm row-top"><span class="section-icon">' + icon('headset') + '</span><div><b>Kendala Scan?</b><p class="small muted mt-8">Jika kamera tidak dapat dibuka (izin ditolak, dipakai aplikasi lain, atau buram), gunakan <b>Input Kode Manual</b> — kode 8 karakter tertera di bawah QR. Atau tunjukkan ID pendaftaran Anda ke meja panitia.</p></div></div>' +
+      '<div class="card card-pad stack" id="att-status">' + statusHtml() + '</div>' +
+      '<div class="card card-pad-sm row-top"><span class="section-icon">' + icon('headset') + '</span><div><b>Kendala Scan?</b><p class="small muted mt-8">Kamera tidak bisa dibuka (izin ditolak / dipakai aplikasi lain)? Gunakan <b>Input Kode Manual</b> — kode 8 karakter tertera di bawah QR — atau tunjukkan Kartu QR ke petugas.</p></div></div>' +
       '</aside></div>';
 
     var video = $('#cam'), canvas = $('#cv'), ctx2d = canvas.getContext('2d', { willReadFrequently: true });
+    var result = $('#scan-result');
+    var showResult = function (kind, title, sub, ms) {
+      var ic = { kirim: '<span class="spinner" style="width:42px;height:42px;border-width:4px"></span>', ok: icon('checkCircle', 'ic-xl'), dup: icon('info', 'ic-xl'), err: icon('xCircle', 'ic-xl') }[kind];
+      result.className = 'scan-result sr-' + kind;
+      result.innerHTML = '<div class="sr-ic">' + ic + '</div><div class="sr-title">' + esc(title) + '</div>' + (sub ? '<div class="sr-sub">' + esc(sub) + '</div>' : '') +
+        (kind === 'err' ? '<button class="btn btn-light btn-sm mt-16" id="sr-retry">Scan ulang</button>' : '');
+      result.hidden = false;
+      on($('#sr-retry'), 'click', function () { result.hidden = true; busy = false; if (!stream) startCam(); });
+      if (ms) setTimeout(function () { if (result.className.indexOf('sr-' + kind) > -1) { result.hidden = true; busy = false; } }, ms);
+    };
+    var applyHadir = function (r) {
+      var x = sesiById[r.sesiId] || ab.sesi.filter(function (y) { return y.nama === r.sesi; })[0];
+      if (x && !x.hadir) { x.hadir = true; x.waktu_scan = r.waktu; }
+      ab.hadir = Math.max(r.hadir || 0, ab.sesi.filter(function (y) { return y.hadir; }).length);
+      $('#att-status').innerHTML = statusHtml();
+      var a2 = activeSesi(); $('#act-name').textContent = a2 ? a2.nama : 'Semua sesi sudah tercatat';
+    };
 
     var submitScan = function (payload, isManual) {
-      if (processing) return;
-      processing = true;
+      if (busy) return;
+      busy = true;
+      if (navigator.vibrate) navigator.vibrate(60);
+      // 1) Umpan balik INSTAN (0 ms) — peserta tahu kode sudah terbaca
+      var m = String(payload).match(/^SIMEV\|([^|]+)\|/i);
+      var sesi = m ? sesiById[m[1]] : null;
+      if (m && !sesi) { showResult('err', 'QR bukan untuk event ini', 'Pastikan Anda memindai layar sesi event yang benar.'); return; }
+      if (sesi && sesi.hadir) { showResult('dup', 'Sudah tercatat', sesi.nama + ' · ' + fmtTime(sesi.waktu_scan), 2200); return; }
+      if (sesi && sesi.status !== 'buka') {
+        // status sesi di cache bisa basi — tetap kirim ke server
+      }
+      showResult('kirim', 'Kode terbaca ✓', 'Mencatat kehadiran' + (sesi ? ' — ' + sesi.nama : '') + '…');
       var item = { clientId: 'c' + Date.now() + Math.random().toString(36).slice(2, 7), scannedAt: Date.now() };
       if (isManual) item.kode = payload; else item.payload = payload;
-      $('#pill').innerHTML = '<span class="spinner"></span> Memverifikasi kode…';
+      // 2) Kirim di latar; kamera dimatikan agar hemat baterai
+      stopCam(true);
       API.call('scanAbsensi', item, { noRedirect: true }).then(function (r) {
-        toast((r.sudah ? 'ℹ️ ' : '✅ ') + (r.sudah ? 'Sudah tercatat' : 'Hadir tercatat') + ' — ' + r.sesi + ' (' + r.hadir + '/' + r.wajib + ')', r.sudah ? 'warn' : 'ok', 5000);
-        if (navigator.vibrate) navigator.vibrate(120);
-        stopCam();
-        setTimeout(function () { if (Router.alive(rid)) Router.resolve(); }, 700);
+        if (navigator.vibrate) navigator.vibrate([80, 60, 80]);
+        applyHadir(r);
+        showResult(r.sudah ? 'dup' : 'ok', r.sudah ? 'Sudah tercatat' : 'Hadir tercatat!', r.sesi + ' · ' + r.hadir + '/' + r.wajib + ' sesi', r.memenuhi ? 0 : 3000);
       }).catch(function (e) {
         if (e.network) {
           ScanQueue.add(item);
-          toast('Koneksi terputus. Scan disimpan & akan dikirim otomatis saat online.', 'warn', 6000);
-          stopCam();
+          showResult('ok', 'Tersimpan di perangkat', 'Sinyal lemah — absensi dikirim otomatis saat online.', 4000);
         } else {
-          errToast(e);
-          setTimeout(function () { processing = false; if (stream) $('#pill').innerHTML = '<span class="pulse"></span> Kamera aktif — memindai…'; }, 1800);
-          return;
+          showResult('err', 'Absensi ditolak', e.message);
         }
-        processing = false;
-      }).then(function () { if (!stream) processing = false; });
+      });
     };
 
     var tick = function () {
-      if (!stream || video.readyState < 2) { loopTimer = setTimeout(tick, 250); return; }
-      if (processing) { loopTimer = setTimeout(tick, 400); return; }
+      if (!stream) return;
+      if (video.readyState < 2 || busy) { loopTimer = setTimeout(tick, 120); return; }
       var done = function (text) {
+        var now = Date.now();
+        if (text && text === lastText && now - lastAt < 2500) text = null; // abaikan bacaan ganda
+        if (text) { lastText = text; lastAt = now; }
         if (text && /^SIMEV\|/i.test(text)) submitScan(text, false);
-        else if (text) { toast('QR ini bukan QR absensi SIM Event.', 'warn'); }
-        loopTimer = setTimeout(tick, text ? 1500 : 220);
+        else if (text && /^SIMEVP\|/i.test(text)) toast('Itu Kartu QR peserta. Pindai QR sesi di layar panitia.', 'warn');
+        else if (text) toast('QR ini bukan QR absensi SIM Event.', 'warn');
+        if (stream) loopTimer = setTimeout(tick, text ? 900 : 90);
       };
       if (detector) {
         detector.detect(video).then(function (codes) { done(codes[0] && codes[0].rawValue); }).catch(function () { detector = null; done(null); });
       } else if (window.jsQR) {
-        var w = video.videoWidth, h = video.videoHeight, scale = Math.min(1, 720 / Math.max(w, h));
-        canvas.width = Math.round(w * scale); canvas.height = Math.round(h * scale);
-        ctx2d.drawImage(video, 0, 0, canvas.width, canvas.height);
-        var img = ctx2d.getImageData(0, 0, canvas.width, canvas.height);
-        var code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+        // pindai area tengah 70% dengan resolusi rendah → 3–5x lebih cepat
+        var w = video.videoWidth, h = video.videoHeight, side = Math.min(w, h) * 0.75, sx = (w - side) / 2, sy = (h - side) / 2, out = Math.min(480, side);
+        canvas.width = out; canvas.height = out;
+        ctx2d.drawImage(video, sx, sy, side, side, 0, 0, out, out);
+        var img = ctx2d.getImageData(0, 0, out, out);
+        var code = window.jsQR(img.data, out, out, { inversionAttempts: 'dontInvert' });
         done(code && code.data);
       } else done(null);
     };
@@ -261,29 +326,30 @@ function pageAbsensi(params, query, rid) {
     var startCam = function () {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return toast('Browser tidak mendukung kamera. Gunakan Input Kode Manual.', 'err');
       if (!window.isSecureContext) return toast('Kamera hanya bisa diakses lewat HTTPS.', 'err');
+      if (stream) return;
       var b = $('#btn-start'); btnLoading(b, true, 'Membuka kamera…');
-      var libs = ('BarcodeDetector' in window)
-        ? window.BarcodeDetector.getSupportedFormats().then(function (f) { if (f.indexOf('qr_code') > -1) detector = new window.BarcodeDetector({ formats: ['qr_code'] }); else return loadScript('js/vendor/jsQR.js'); }).catch(function () { return loadScript('js/vendor/jsQR.js'); })
-        : loadScript('js/vendor/jsQR.js');
-      libs.then(function () {
-        var constraints = { audio: false, video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } };
-        return navigator.mediaDevices.getUserMedia(constraints);
-      }).then(function (s) {
-        if (!Router.alive(rid)) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
+      result.hidden = true; busy = false;
+      var constraints = { audio: false, video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } };
+      Promise.all([detectorReady, navigator.mediaDevices.getUserMedia(constraints)]).then(function (res) {
+        var s = res[1];
+        detector = res[0];
+        if (!Router.alive(rid) || !$('#cam')) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
         stream = s;
-        video.srcObject = s; video.hidden = false; video.play();
+        Store.set('cam_ok', true);
+        video.srcObject = s; video.hidden = false; video.play().catch(function () {});
         $('#idle').hidden = true; $('#frame').hidden = false; $('#pill').hidden = false; $('#btn-stop').hidden = false;
         var track = s.getVideoTracks()[0];
         var caps = track.getCapabilities ? track.getCapabilities() : {};
         $('#btn-torch').hidden = !caps.torch;
-        return navigator.mediaDevices.enumerateDevices().then(function (devs) {
+        tick();
+        navigator.mediaDevices.enumerateDevices().then(function (devs) {
           var cams = devs.filter(function (x) { return x.kind === 'videoinput'; });
           var sel = $('#cam-sel');
-          sel.innerHTML = cams.map(function (c, i) { return '<option value="' + esc(c.deviceId) + '"' + (track.getSettings().deviceId === c.deviceId ? ' selected' : '') + '>' + esc(c.label || 'Kamera ' + (i + 1)) + '</option>'; }).join('');
-          tick();
+          if (sel) sel.innerHTML = cams.map(function (c, i) { return '<option value="' + esc(c.deviceId) + '"' + (track.getSettings().deviceId === c.deviceId ? ' selected' : '') + '>' + esc(c.label || 'Kamera ' + (i + 1)) + '</option>'; }).join('');
         });
       }).catch(function (e) {
         btnLoading(b, false);
+        Store.del('cam_ok');
         var msg = e.name === 'NotAllowedError' ? 'Izin kamera ditolak. Aktifkan izin kamera di pengaturan browser, atau gunakan Input Kode Manual.'
           : e.name === 'NotReadableError' ? 'Kamera sedang dipakai aplikasi lain (Zoom/WA/kamera bawaan). Tutup aplikasi tersebut atau gunakan Input Kode Manual.'
           : e.name === 'NotFoundError' || e.name === 'OverconstrainedError' ? 'Kamera tidak ditemukan. Gunakan Input Kode Manual.'
@@ -292,18 +358,20 @@ function pageAbsensi(params, query, rid) {
         if (deviceId) { deviceId = ''; Store.del('cam_id'); }
       });
     };
-    var stopCam = function () {
+    var stopCam = function (keepResult) {
       clearTimeout(loopTimer);
       if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
       stream = null;
       if (!$('#cam')) return;
       video.hidden = true; $('#frame').hidden = true; $('#pill').hidden = true; $('#btn-stop').hidden = true; $('#btn-torch').hidden = true;
       $('#idle').hidden = false; btnLoading($('#btn-start'), false);
+      if (!keepResult) { result.hidden = true; busy = false; }
     };
-    Router.onLeave(stopCam);
+    Router.onLeave(function () { stopCam(); });
 
     on($('#btn-start'), 'click', startCam);
-    on($('#btn-stop'), 'click', stopCam);
+    on($('#btn-stop'), 'click', function () { stopCam(); });
+    on($('#btn-kartu2'), 'click', function () { kartuModal(d); });
     on($('#cam-sel'), 'change', function () { deviceId = this.value; Store.set('cam_id', deviceId); if (stream) { stopCam(); startCam(); } });
     var torchOn = false;
     on($('#btn-torch'), 'click', function () {
@@ -314,17 +382,23 @@ function pageAbsensi(params, query, rid) {
     on($('#btn-manual'), 'click', function () {
       var m = openModal({
         title: 'Input Kode Sesi Manual',
-        body: '<p class="small muted">Masukkan kode 8 karakter yang tertera di bawah QR pada layar panitia.</p><input class="input mono mt-16" id="man-code" maxlength="8" placeholder="A1B2C3D4" style="text-transform:uppercase;letter-spacing:6px;font-size:22px;height:56px;text-align:center" autocomplete="off">',
+        body: '<p class="small muted">Masukkan kode 8 karakter yang tertera di bawah QR pada layar panitia.</p><input class="input mono mt-16" id="man-code" maxlength="8" placeholder="A1B2C3D4" style="text-transform:uppercase;letter-spacing:6px;font-size:22px;height:56px;text-align:center" autocomplete="off" inputmode="latin">',
         foot: '<button class="btn btn-secondary" data-close>Batal</button><button class="btn btn-primary" id="man-ok">' + icon('check', 'ic-sm') + ' Kirim Absensi</button>'
       });
       var inp = $('#man-code', m.el); inp.focus();
-      var send = function () { var v = inp.value.trim().toUpperCase(); if (v.length < 6) return toast('Kode minimal 6 karakter.', 'err'); m.close(); submitScan(v, true); };
+      var send = function () { var v = inp.value.trim().toUpperCase(); if (v.length < 6) return toast('Kode minimal 6 karakter.', 'err'); m.close(); busy = false; submitScan(v, true); };
       on($('#man-ok', m.el), 'click', send);
       on(inp, 'keydown', function (e) { if (e.key === 'Enter') send(); });
     });
 
-    if (ScanQueue.get().length) ScanQueue.flush().then(function (n) { if (n && Router.alive(rid)) Router.resolve(); });
-  });
+    // Kamera langsung menyala bila izin sudah pernah diberikan (tanpa klik)
+    var auto = function () { if (activeSesi() && Router.alive(rid)) startCam(); };
+    if (navigator.permissions && navigator.permissions.query) {
+      navigator.permissions.query({ name: 'camera' }).then(function (p) { if (p.state === 'granted') auto(); }).catch(function () { if (Store.get('cam_ok', false)) auto(); });
+    } else if (Store.get('cam_ok', false)) auto();
+
+    if (ScanQueue.get().length) ScanQueue.flush();
+  }, { once: true });
 }
 
 // --------------------------------------------------------------------------
@@ -349,7 +423,7 @@ var RATING_LABEL = ['', 'Buruk', 'Kurang', 'Cukup', 'Sangat Baik', 'Istimewa'];
 
 function pageEvaluasi(params, query, rid) {
   Layout.app(skeleton(4), 'evaluasi', { subtitle: 'Portal Peserta' });
-  return Portal.load().then(function (d) {
+  return Portal.load(function (d) {
     if (!Router.alive(rid)) return;
     if (d.pendaftar.status_verifikasi !== 'lolos') {
       $('#page').innerHTML = portalLocked(d, 'Evaluasi', 'Evaluasi Event', 'Evaluasi terbuka setelah Anda lolos verifikasi dan memenuhi absensi.', '<a class="btn btn-light" href="#/portal">Lihat Status</a>');
@@ -454,26 +528,15 @@ function pageEvaluasi(params, query, rid) {
         Router.go('#/portal/sertifikat');
       }).catch(function (err) { btnLoading(b, false); errToast(err); });
     });
-  });
+  }, { once: true });
 }
 
 // --------------------------------------------------------------------------
 // SERTIFIKAT
 // --------------------------------------------------------------------------
-function verifyUrl(nomor, base) {
-  var root = base || (location.origin + location.pathname);
-  return root.replace(/\/?$/, '/').replace(/index\.html\/$/, '') + '#/verifikasi?nomor=' + encodeURIComponent(nomor);
-}
-
-function sigSvg(seed) {
-  var h = 0; for (var i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 997;
-  var a = 8 + h % 10, b = 22 + h % 14;
-  return '<svg class="sig-draw" viewBox="0 0 140 36" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 26c10-2 14-' + a + ' 22-' + a + 's4 16 12 14 8-' + b / 2 + ' 16-' + b / 2 + ' 6 12 14 10 10-10 18-10 8 8 16 6 12-6 30-4"/></svg>';
-}
-
 function pageSertifikat(params, query, rid) {
   Layout.app(skeleton(4), 'sertifikat', { subtitle: 'Portal Peserta' });
-  return Portal.load().then(function (d) {
+  return Portal.load(function (d) {
     if (!Router.alive(rid)) return;
     var audit = Portal.audit(d);
     if (d.pendaftar.status_verifikasi !== 'lolos' || !d.absensi.memenuhi || !d.evaluasi.sudah) {
@@ -483,51 +546,68 @@ function pageSertifikat(params, query, rid) {
       $('#page').innerHTML = portalLocked(d, 'Sertifikat', 'Sertifikat', 'Selesaikan seluruh prasyarat — verifikasi, absensi ' + d.absensi.wajib + ' sesi, dan evaluasi wajib — untuk membuka sertifikat Anda.', cta);
       return;
     }
-    var sert = d.sertifikat || { nomor: '', status: 'antri' };
-    var url = sert.nomor ? verifyUrl(sert.nomor, d.urlFrontend) : '';
-    var ttd = (d.penandatangan || []).slice(0, 2);
-    var terbit = sert.status === 'terbit';
+    var sert = d.sertifikat;
+    if (!sert) {
+      $('#page').innerHTML = Portal.head(d, 'Sertifikat', 'Sertifikat Saya') + '<div class="card card-pad center">' + emptyState('clock', 'Sertifikat sedang diterbitkan', 'Muat ulang halaman ini dalam beberapa saat.', '<button class="btn btn-primary" onclick="API.clearCache();Router.resolve()">' + icon('refresh', 'ic-sm') + ' Muat Ulang</button>') + '</div>';
+      return;
+    }
+    var base = (d.urlFrontend || (location.origin + location.pathname)).replace(/index\.html$/, '').replace(/\/?$/, '/');
+    var url = base + '#/verifikasi?nomor=' + encodeURIComponent(sert.nomor);
+    var data = null, pdfBlob = null;
 
-    $('#page').innerHTML =
-      '<div class="page-head"><div class="grow"><div class="crumbs">Portal Peserta <span>/</span> <b>Repositori Sertifikat</b></div><div class="row wrap"><h1>Sertifikat Saya</h1><span class="badge b-blue">' + icon('calendar', 'ic-sm') + ' ' + esc(d.event.nama) + '</span></div></div>' +
-      '<div class="user-pill"><div class="right"><div class="bold">' + esc(d.pendaftar.nama) + ' <span style="color:var(--accent)">' + icon('checkCircle', 'ic-sm') + '</span></div><div class="xs muted">ID ' + esc(d.pendaftar.id) + (sert.tanggal_terbit ? ' • Terbit ' + esc(fmtDate(sert.tanggal_terbit)) : '') + '</div></div><span class="avatar">' + esc(initials(d.pendaftar.nama)) + '</span></div></div>' +
-      (terbit
-        ? '<div class="alert alert-ok mb-16">' + icon('shieldCheck', 'ic-lg') + '<div class="grow"><div class="row wrap"><b style="font-size:16px">Sertifikat Terverifikasi & Diterbitkan</b><span class="badge b-green">Tercatat di Basis Data</span></div><p class="small mt-8">Absensi ' + d.absensi.hadir + '/' + d.absensi.wajib + ' sesi dan evaluasi wajib tervalidasi 100% pada ' + esc(fmtDateTime(sert.tanggal_terbit)) + ' WIB.</p></div><span class="badge b-green" style="height:30px;padding:0 14px">Status: Aktif & Valid</span></div>'
-        : '<div class="alert alert-info mb-16">' + icon('clock') + '<div class="grow"><b>Sertifikat sedang disiapkan</b><p class="small mt-8">Klik <b>Unduh PDF</b> untuk menerbitkan sekarang, atau tunggu proses antrean otomatis.</p></div></div>') +
+    $('#page').innerHTML = Portal.head(d, 'Repositori Sertifikat', 'Sertifikat Saya') +
+      '<div class="alert alert-ok mb-16">' + icon('shieldCheck', 'ic-lg') + '<div class="grow"><div class="row wrap"><b style="font-size:16px">Sertifikat Terverifikasi & Diterbitkan</b><span class="badge b-green">Tercatat di Basis Data</span></div><p class="small mt-8">Absensi ' + d.absensi.hadir + '/' + d.absensi.wajib + ' sesi dan evaluasi wajib tervalidasi pada ' + esc(fmtDateTime(sert.tanggal_terbit)) + ' WIB.</p></div><span class="badge b-green" style="height:30px;padding:0 14px" id="arsip-badge">' + (sert.ada_pdf ? 'Arsip PDF & Email ✓' : 'Status: Aktif & Valid') + '</span></div>' +
       '<div class="split"><div class="stack">' +
-      '<div class="card card-pad-sm row wrap"><span class="small muted row">' + icon('shield', 'ic-sm') + ' Nomor unik: <b class="mono">' + esc(sert.nomor || '-') + '</b></span><span class="grow"></span>' +
-      (url ? '<button class="btn btn-secondary btn-sm" id="cp-link">' + icon('link', 'ic-sm') + ' Salin Tautan Publik</button>' +
-        '<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.linkedin.com/sharing/share-offsite/?url=' + encodeURIComponent(url) + '">' + icon('share', 'ic-sm') + ' Bagikan ke LinkedIn</a>' +
-        '<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="' + waLink('', 'Sertifikat saya untuk ' + d.event.nama + ': ' + url) + '">' + icon('message', 'ic-sm') + ' WhatsApp</a>' : '') + '</div>' +
-      '<div class="card card-pad"><div class="cert" id="cert-preview"><span class="corner c1"></span><span class="corner c2"></span><span class="corner c3"></span><span class="corner c4"></span>' +
-      '<div class="row between"><div class="row"><span class="brand-mark" style="width:44px;height:44px;border-radius:10px">' + icon('award', 'ic-lg') + '</span><div><div style="font-family:var(--font-head);font-size:18px;font-weight:600;color:var(--navy)">' + esc(d.penerbit || CFG.ORG_NAME) + '</div><div class="xs muted" style="letter-spacing:.12em">LEMBAGA PENYELENGGARA</div></div></div>' +
-      '<span style="width:62px;height:62px;border-radius:50%;border:2px solid var(--primary-fixed);display:grid;place-items:center;color:var(--primary);font-size:9px;font-weight:700;text-align:center;line-height:10px">' + icon('award') + '<br>RESMI</span></div>' +
-      '<div class="cert-title">SERTIFIKAT KEIKUTSERTAAN</div><p class="center small muted" style="font-style:italic;margin-top:6px">Diberikan dengan hormat kepada</p>' +
-      '<div class="cert-name">' + esc(d.pendaftar.nama) + '</div><div class="cert-line"></div>' +
-      '<p class="center" style="line-height:24px;color:var(--muted-2);max-width:560px;margin:0 auto">' + (d.pendaftar.institusi ? esc(d.pendaftar.institusi) + ', ' : '') + 'atas partisipasi aktif, pemenuhan ' + d.absensi.wajib + ' sesi validasi kehadiran, dan penyelesaian evaluasi pada kegiatan <b style="color:var(--navy)">' + esc(d.event.nama) + '</b> yang diselenggarakan pada ' + esc(fmtDate(d.event.tanggal_mulai, true)) + '.</p>' +
-      '<div class="cert-meta"><div><span>NOMOR SERTIFIKAT</span><b class="mono" style="font-size:13px">' + esc(sert.nomor || '—') + '</b></div><div><span>TANGGAL TERBIT</span><b>' + esc(sert.tanggal_terbit ? fmtDate(sert.tanggal_terbit, true) : '—') + '</b></div><div><span>KATEGORI</span><b>' + esc(d.event.kategori || 'Peserta') + '</b></div></div>' +
-      '<div class="cert-sign">' + (ttd.length ? ttd : [{ nama: 'Ketua Panitia', jabatan: 'Penyelenggara' }]).map(function (t) { return '<div>' + sigSvg(t.nama) + '<div class="sig"><b>' + esc(t.nama) + '</b><div class="xs muted">' + esc(t.jabatan) + '</div></div></div>'; }).join('') +
-      (url ? '<div class="qr-mini">' + qrSvg(url, 3) + '<div class="xs"><b style="letter-spacing:.04em">VERIFIKASI PUBLIK</b><div class="muted mono" style="font-size:9px;word-break:break-all">' + esc(sert.nomor) + '</div><div style="color:var(--accent-dark);font-weight:700">● Tercatat</div></div></div>' : '') +
-      '</div></div></div>' +
-      '<div class="grid-3" style="gap:12px"><button class="btn btn-navy btn-lg" id="btn-dl" style="height:60px">' + icon('download') + ' Unduh PDF Resmi</button>' +
-      '<button class="btn btn-secondary btn-lg" style="height:60px" onclick="window.print()">' + icon('printer') + ' Cetak Pratinjau</button>' +
-      '<a class="btn btn-secondary btn-lg" style="height:60px" href="' + esc(url ? '#/verifikasi?nomor=' + encodeURIComponent(sert.nomor) : '#/verifikasi') + '">' + icon('shieldCheck') + ' Halaman Verifikasi</a></div>' +
+      '<div class="card card-pad-sm row wrap"><span class="small muted row">' + icon('shield', 'ic-sm') + ' Nomor unik: <b class="mono">' + esc(sert.nomor) + '</b></span><span class="grow"></span>' +
+      '<button class="btn btn-secondary btn-sm" id="cp-link">' + icon('link', 'ic-sm') + ' Salin Tautan Publik</button>' +
+      '<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="https://www.linkedin.com/sharing/share-offsite/?url=' + encodeURIComponent(url) + '">' + icon('share', 'ic-sm') + ' LinkedIn</a>' +
+      '<a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="' + waLink('', 'Sertifikat saya untuk ' + d.event.nama + ': ' + url) + '">' + icon('message', 'ic-sm') + ' WhatsApp</a></div>' +
+      '<div class="card card-pad"><div id="cert-host"><div class="skel" style="width:100%;aspect-ratio:1123/794"></div></div>' +
+      '<p class="xs muted center mt-8">Pratinjau ini identik dengan berkas PDF yang diunduh dan dikirim ke email Anda.</p></div>' +
+      '<div class="grid-3" style="gap:12px"><button class="btn btn-navy btn-lg" id="btn-dl" style="height:60px" disabled>' + icon('download') + ' Unduh PDF Resmi</button>' +
+      '<button class="btn btn-secondary btn-lg" style="height:60px" id="btn-print" disabled>' + icon('printer') + ' Cetak</button>' +
+      '<a class="btn btn-secondary btn-lg" style="height:60px" href="#/verifikasi?nomor=' + encodeURIComponent(sert.nomor) + '">' + icon('shieldCheck') + ' Halaman Verifikasi</a></div>' +
       '</div><aside class="stack">' +
       '<div class="card card-pad-sm stack-sm"><div class="row between"><h4>' + icon('clipboard', 'ic-sm') + ' Audit Prasyarat</h4><span class="badge b-green">' + audit.done + '/' + audit.total + ' Lulus</span></div><p class="small muted">Seluruh kriteria diverifikasi otomatis oleh sistem.</p>' + audit.html + '</div>' +
-      (url ? '<div class="card card-pad-sm stack-sm"><h4>' + icon('globe', 'ic-sm') + ' Registri Publik</h4><p class="small muted">Siapa pun dengan tautan atau QR ini dapat memverifikasi keaslian sertifikat Anda tanpa login.</p>' +
-        '<div class="row" style="background:var(--surface-alt);border-radius:8px;padding:6px 6px 6px 10px"><span class="mono ellipsis grow" style="font-size:11px">' + esc(url) + '</span><button class="btn btn-primary btn-xs" id="cp-link2">' + icon('copy', 'ic-sm') + ' Salin</button></div>' +
-        '<div class="row-top q-box"><div style="width:84px;flex:none;background:#fff;padding:4px;border-radius:6px">' + qrSvg(url, 3) + '</div><div><b class="small">Scan dari Ponsel</b><p class="xs muted mt-8">Arahkan kamera ke QR untuk membuka halaman validasi langsung.</p></div></div></div>' : '') +
+      '<div class="card card-pad-sm stack-sm"><h4>' + icon('globe', 'ic-sm') + ' Registri Publik</h4><p class="small muted">Siapa pun dengan tautan atau QR ini dapat memverifikasi keaslian sertifikat Anda tanpa login.</p>' +
+      '<div class="row" style="background:var(--surface-alt);border-radius:8px;padding:6px 6px 6px 10px"><span class="mono ellipsis grow" style="font-size:11px">' + esc(url) + '</span><button class="btn btn-primary btn-xs" id="cp-link2">' + icon('copy', 'ic-sm') + ' Salin</button></div>' +
+      '<div class="row-top q-box"><div style="width:84px;flex:none;background:#fff;padding:4px;border-radius:6px">' + qrSvg(url, 3) + '</div><div><b class="small">Scan dari Ponsel</b><p class="xs muted mt-8">Arahkan kamera ke QR untuk membuka halaman validasi langsung.</p></div></div></div>' +
       '</aside></div>';
 
     on($('#cp-link'), 'click', function () { copyText(url, 'Tautan verifikasi'); });
     on($('#cp-link2'), 'click', function () { copyText(url, 'Tautan verifikasi'); });
+
+    var makePdf = function () {
+      if (pdfBlob) return Promise.resolve(pdfBlob);
+      return CertDesign.toPdf(data).then(function (b) { pdfBlob = b; return b; });
+    };
     on($('#btn-dl'), 'click', function () {
-      var b = this; btnLoading(b, true, terbit ? 'Mengunduh…' : 'Menerbitkan…');
-      API.call('downloadSertifikat').then(function (f) {
-        downloadBlob(b64ToBlob(f.base64, f.mime), f.fileName || 'sertifikat.pdf');
-        toast('Sertifikat ' + f.nomor + ' diunduh.', 'ok');
-        if (!terbit) Router.resolve();
-      }).catch(errToast).finally(function () { btnLoading(b, false); });
+      var b = this; btnLoading(b, true, 'Menyiapkan PDF…');
+      makePdf().then(function (blob) { downloadBlob(blob, CertDesign.fileName(data)); toast('Sertifikat ' + sert.nomor + ' diunduh.', 'ok'); })
+        .catch(errToast).then(function () { btnLoading(b, false); });
     });
-  });
+    on($('#btn-print'), 'click', function () {
+      var w = window.open('', '_blank');
+      makePdf().then(function (blob) { var u = URL.createObjectURL(blob); if (w) w.location.href = u; else location.href = u; }).catch(function (e) { if (w) w.close(); errToast(e); });
+    });
+
+    CertAssets.get('', d.desainVersi).then(function (assets) {
+      if (!Router.alive(rid) || !$('#cert-host')) return;
+      data = CertDesign.data(assets, { nama: d.pendaftar.nama, institusi: d.pendaftar.institusi, nomor: sert.nomor, tanggal_terbit: sert.tanggal_terbit });
+      CertDesign.mount($('#cert-host'), data);
+      $('#btn-dl').disabled = false; $('#btn-print').disabled = false;
+      // Arsip & kirim email otomatis (sekali) — PDF yang sama persis dengan pratinjau
+      if (!sert.ada_pdf && !CertAssets['_up_' + sert.id]) {
+        CertAssets['_up_' + sert.id] = true;
+        setTimeout(function () {
+          makePdf().then(CertDesign.blobToBase64).then(function (b64) {
+            return API.call('uploadSertifikatPdf', { base64: b64 }, { noRedirect: true, timeout: 120000 });
+          }).then(function (r) {
+            var bd = $('#arsip-badge'); if (bd) bd.textContent = 'Arsip PDF & Email ✓';
+            if (r.status_email === 'terkirim') toast('Salinan sertifikat PDF telah dikirim ke ' + d.pendaftar.email, 'ok', 5000);
+          }).catch(function () { CertAssets['_up_' + sert.id] = false; });
+        }, 600);
+      }
+    }).catch(function (e) { $('#cert-host').innerHTML = '<div class="alert alert-err">' + icon('alertCircle') + '<div>' + esc(e.message) + '</div></div>'; });
+  }, { once: true });
 }

@@ -67,7 +67,7 @@ function pageHome(params, query, rid) {
     '<button class="btn btn-primary" id="btn-filter">' + icon('filter', 'ic-sm') + ' Filter</button></div>' +
     '<div class="row between wrap mt-24 mb-16" id="events" style="scroll-margin-top:80px"><h2>Event Mendatang</h2><span class="small muted" id="ev-count"></span></div>' +
     '<div id="ev-grid" class="event-grid">' + [1, 2, 3].map(function () { return '<div class="skel" style="height:380px;border-radius:12px"></div>'; }).join('') + '</div>' +
-    '<section class="band mt-24" style="margin-top:48px"><div><h2>Sudah mendaftar?</h2><p>Masuk memakai email dan kode akses untuk memantau verifikasi, melakukan absensi, dan mengunduh sertifikat Anda.</p></div>' +
+    '<section class="band mt-24" style="margin-top:48px"><div><h2>Sudah mendaftar?</h2><p>Masuk sekali, berikutnya cukup satu ketukan. Pantau verifikasi, absensi, dan unduh sertifikat semua event Anda.</p></div>' +
     '<div class="row wrap"><a class="btn btn-light btn-lg" href="#/masuk">' + icon('login') + ' Masuk Portal Peserta</a><a class="btn btn-ghost btn-lg" style="color:#fff" href="#/verifikasi">' + icon('shieldCheck') + ' Cek Sertifikat</a></div></section>' +
     '</div>', 'home');
 
@@ -122,7 +122,7 @@ function pageHome(params, query, rid) {
 // --------------------------------------------------------------------------
 function pageEventDetail(params, query, rid) {
   Layout.public('<div class="container" style="padding-top:28px">' + skeleton(3) + '</div>', 'events');
-  return API.call('getEventDetail', { id: params.id }).then(function (d) {
+  return API.swr('getEventDetail', { id: params.id }, function (d) {
     if (!Router.alive(rid)) return;
     var ev = d.event;
     var hari = daysUntil(ev.batas_daftar || ev.tanggal_mulai);
@@ -161,11 +161,14 @@ var SYARAT_ICON = { pembayaran: 'receipt', follow: 'userCheck', share: 'megaphon
 
 function pageDaftar(params, query, rid) {
   Layout.public('<div class="container narrow" style="padding-top:28px">' + skeleton(4) + '</div>', 'events');
-  return API.call('getEventDetail', { id: params.id }).then(function (d) {
+  return API.swr('getEventDetail', { id: params.id }, function (d) {
     if (!Router.alive(rid)) return;
     var ev = d.event;
     var draftKey = 'draft_reg_' + ev.id;
     var draft = Store.get(draftKey, {});
+    // Member yang sudah login → biodata terisi otomatis
+    var member = S.isPeserta() ? S.user : null;
+    if (member) ['nama', 'email', 'hp', 'institusi'].forEach(function (k) { if (member[k]) draft[k] = member[k]; });
     var files = {};
     var hari = daysUntil(ev.batas_daftar || ev.tanggal_mulai);
 
@@ -179,7 +182,7 @@ function pageDaftar(params, query, rid) {
 
     var inputField = function (name, label, ic, type, ph, hint, right) {
       return '<div class="field"><label class="label" for="f-' + name + '"><span>' + label + ' <span class="req">*</span></span>' + (right ? '<span class="xs muted">' + right + '</span>' : '') + '</label>' +
-        '<div class="input-icon">' + icon(ic) + '<input class="input input-soft" id="f-' + name + '" name="' + name + '" type="' + type + '" placeholder="' + esc(ph) + '" value="' + esc(draft[name] || '') + '" required></div>' +
+        '<div class="input-icon">' + icon(ic) + '<input class="input input-soft" id="f-' + name + '" name="' + name + '" type="' + type + '" placeholder="' + esc(ph) + '" value="' + esc(draft[name] || '') + '" required' + (name === 'email' && member ? ' readonly' : '') + '></div>' +
         (hint ? '<span class="hint">' + hint + '</span>' : '') + '</div>';
     };
 
@@ -190,9 +193,10 @@ function pageDaftar(params, query, rid) {
       '<h1 class="mt-8">' + esc(ev.nama) + '</h1><p class="muted mt-8">Lengkapi data diri dan dokumen persyaratan untuk mengamankan kursi Anda.</p></div>' +
       '<div class="stack-sm" style="align-items:flex-end"><span class="small row"><span class="status-dot"></span> Status: Dibuka</span><span class="badge b-navy">' + (ev.biaya ? rupiah(ev.biaya) : 'Gratis') + '</span></div></div>' +
 
+      '<div id="member-banner" class="mt-24"></div>' +
       '<form id="reg-form" class="stack gap-lg mt-24" novalidate>' +
       // Section 01
-      '<section class="card section-card"><div class="section-head"><div class="section-icon">' + icon('idCard') + '</div><div class="grow"><h3>Data Diri</h3><p class="small muted">Semua kolom wajib diisi.</p></div><span class="tag-section">Bagian 01</span></div>' +
+      '<section class="card section-card"><div class="section-head"><div class="section-icon">' + icon('idCard') + '</div><div class="grow"><h3>Data Diri</h3><p class="small muted" id="dd-sub">' + (member ? 'Diisi otomatis dari akun member Anda — periksa & perbarui bila perlu.' : 'Semua kolom wajib diisi.') + '</p></div><span class="tag-section">Bagian 01</span></div>' +
       '<div class="stack">' + inputField('nama', 'Nama Lengkap', 'user', 'text', 'mis. Ahmad Fauzan', '', 'Sesuai kartu identitas') +
       '<div class="grid-2">' + inputField('email', 'Alamat Email', 'mail', 'email', 'nama@contoh.com', 'Kode akses & notifikasi dikirim ke sini') +
       inputField('hp', 'WhatsApp / No. HP', 'phone', 'tel', '0812-3456-7890', 'Untuk konfirmasi panitia') + '</div>' +
@@ -226,6 +230,57 @@ function pageDaftar(params, query, rid) {
       '</form></div>';
 
     var form = $('#reg-form');
+
+    // ---------- Isi otomatis untuk member lama ----------
+    var fillMember = function (u) {
+      member = u;
+      ['nama', 'email', 'hp', 'institusi'].forEach(function (k) { if (u[k]) { form[k].value = u[k]; form[k].classList.remove('invalid'); } });
+      form.email.readOnly = true;
+      $('#dd-sub').textContent = 'Diisi otomatis dari akun member Anda — periksa & perbarui bila perlu.';
+      $('#member-banner').innerHTML = '<div class="member-banner ok">' + icon('userCheck') + '<div class="grow small"><b>Masuk sebagai ' + esc(u.nama) + '</b> · ' + esc(u.email) + '<br><span class="muted">Data diri sudah terisi. Cukup lengkapi persyaratan unggah di bawah.</span></div></div>';
+      var target = $('.req-grid', form) || $('#f-setuju');
+      if (target) setTimeout(function () { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 150);
+    };
+    var loginThen = function (email, btn) {
+      var dev = Devices.find(email);
+      var viaDevice = dev ? Devices.login(dev) : Promise.reject({ code: 'NEED_KODE' });
+      if (btn) btnLoading(btn, true, 'Masuk…');
+      return viaDevice.catch(function (e) {
+        if (e && e.code && e.code !== 'NEED_KODE') throw e;
+        // tanpa perangkat tepercaya: mode "email" langsung, selain itu minta kode sekali
+        return API.call('loginPeserta', { email: email }, { noRedirect: true }).then(function (d) { S.setSession(d); return d; }).catch(function (e2) {
+          if (e2.code !== 'NEED_KODE') throw e2;
+          return askKode(email).then(function (kode) {
+            return API.call('loginPeserta', { email: email, kode: kode }, { noRedirect: true }).then(function (d) { S.setSession(d); return d; });
+          });
+        });
+      }).then(function (d) {
+        fillMember(d.user);
+        toast('Selamat datang kembali, ' + d.user.nama + '!', 'ok');
+      }).catch(function (e) { if (e && e.message) errToast(e); }).then(function () { if (btn) btnLoading(btn, false); });
+    };
+    var showMemberOffer = function (html) { $('#member-banner').innerHTML = html; };
+    if (member) {
+      showMemberOffer('<div class="member-banner ok">' + icon('userCheck') + '<div class="grow small"><b>Mendaftar sebagai ' + esc(member.nama) + '</b> · ' + esc(member.email) + '<br><span class="muted">Data diri terisi otomatis dari akun member. Cukup lengkapi persyaratan unggah.</span></div></div>');
+    } else {
+      var devs = Devices.list();
+      if (devs.length) {
+        showMemberOffer('<div class="member-banner">' + icon('users') + '<div class="grow small"><b>Pernah ikut event sebelumnya?</b><br><span class="muted">Pilih akun Anda — data diri akan terisi otomatis.</span></div>' +
+          devs.slice(0, 3).map(function (dv) { return '<button type="button" class="btn btn-primary btn-sm" data-dev="' + esc(dv.email) + '">' + icon('login', 'ic-sm') + ' ' + esc(dv.nama.split(' ')[0]) + '</button>'; }).join('') + '</div>');
+        $$('[data-dev]').forEach(function (b) { on(b, 'click', function () { loginThen(b.dataset.dev, b); }); });
+      }
+      on(form.email, 'blur', function () {
+        var em = form.email.value.trim().toLowerCase();
+        if (member || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(em)) return;
+        API.call('cekMember', { email: em }, { noRedirect: true }).then(function (c) {
+          if (!c.member || member || form.email.value.trim().toLowerCase() !== em) return;
+          showMemberOffer('<div class="member-banner">' + icon('userCheck') + '<div class="grow small"><b>Email ini sudah terdaftar sebagai member</b> (' + esc(c.nama_samar) + ', ' + c.jumlah_event + ' event).<br><span class="muted">Masuk untuk mengisi data diri secara otomatis.</span></div>' +
+            '<button type="button" class="btn btn-primary btn-sm" id="btn-isi">' + icon('login', 'ic-sm') + ' Masuk & Isi Otomatis</button></div>');
+          on($('#btn-isi'), 'click', function () { loginThen(em, this); });
+        }).catch(function () {});
+      });
+    }
+
     var saveDraft = debounce(function () {
       var nilai = {};
       $$('[data-nilai]', form).forEach(function (el) { nilai[el.dataset.nilai] = el.value; });
@@ -286,7 +341,11 @@ function pageDaftar(params, query, rid) {
       API.call('register', { eventId: ev.id, nama: form.nama.value, email: form.email.value, hp: form.hp.value, institusi: form.institusi.value, nilai: nilai }, { noRedirect: true })
         .then(function (r) {
           reg = r;
-          S.setSession(r);
+          if (r.member) {
+            S.user.nama = r.user.nama; S.user.hp = r.user.hp; S.user.institusi = r.user.institusi; Store.set('user', S.user);
+            S.setPid(r.pendaftarId);
+          } else S.setSession(r);
+          if (!r.member || !S.user.role) { S.user.role = 'CALON'; Store.set('user', S.user); }
           logLine('Data pendaftaran tersimpan (ID ' + r.pendaftarId + ')');
           var gagal = [];
           var chain = Promise.resolve();
@@ -311,10 +370,10 @@ function pageDaftar(params, query, rid) {
           prog.close();
           btnLoading(btn, false);
           errToast(err);
-          if (err.code === 'DUPLICATE') setTimeout(function () { Router.go('#/masuk'); }, 1800);
+          if (err.code === 'DUPLICATE') setTimeout(function () { Router.go(S.isPeserta() ? '#/portal' : '#/masuk'); }, 1800);
         });
     });
-  });
+  }, { once: true });
 }
 
 function renderRegSuccess(ev, reg, gagal) {
@@ -322,10 +381,11 @@ function renderRegSuccess(ev, reg, gagal) {
     '<div class="card card-pad stack center" style="align-items:center">' +
     '<div class="section-icon" style="width:64px;height:64px;border-radius:50%;background:var(--accent-soft);color:var(--accent-dark)">' + icon('checkCircle', 'ic-xl') + '</div>' +
     '<h1>Pendaftaran Terkirim!</h1><p class="muted">Terima kasih, <b>' + esc(reg.user.nama) + '</b>. Pendaftaran Anda di <b>' + esc(ev.nama) + '</b> sedang menunggu verifikasi panitia.</p>' +
-    '<div class="kode-box" style="width:100%;max-width:420px"><div class="xs" style="letter-spacing:.1em;color:#adc8f5">KODE AKSES ANDA</div><div class="kode">' + esc(reg.kode) + '</div>' +
+    (reg.member || !reg.kode ? '<div class="alert alert-ok" style="text-align:left;width:100%">' + icon('userCheck') + '<div class="small"><b>Tercatat di akun member Anda.</b> Tidak perlu kode baru — pantau semua event Anda dari satu portal. Pada perangkat ini Anda bisa langsung masuk tanpa kode.</div></div>' : '') +
+    (!reg.kode ? '' : '<div class="kode-box" style="width:100%;max-width:420px"><div class="xs" style="letter-spacing:.1em;color:#adc8f5">KODE AKSES ANDA</div><div class="kode">' + esc(reg.kode) + '</div>' +
     '<div class="xs" style="color:#adc8f5">ID ' + esc(reg.pendaftarId) + '</div>' +
     '<button class="btn btn-light btn-sm mt-16" id="cp-kode">' + icon('copy', 'ic-sm') + ' Salin Kode</button></div>' +
-    '<div class="alert alert-warn" style="text-align:left;width:100%">' + icon('key') + '<div class="small"><b>Simpan kode ini baik-baik.</b> Anda memerlukan <b>email + kode akses</b> untuk masuk portal, mengunggah ulang berkas, absen, dan mengunduh sertifikat. Kode juga dikirim ke email Anda bila notifikasi aktif.</div></div>' +
+    '<div class="alert alert-warn" style="text-align:left;width:100%">' + icon('key') + '<div class="small"><b>Simpan kode ini baik-baik.</b> Kode akses berlaku untuk <b>semua event</b> Anda. Di perangkat ini Anda akan otomatis dikenali (login 1-tap); kode hanya diminta saat masuk dari HP/laptop lain. Kode juga dikirim ke email bila notifikasi aktif.</div></div>') +
     (gagal.length ? '<div class="alert alert-err" style="text-align:left;width:100%">' + icon('alertCircle') + '<div class="small">Berkas berikut gagal diunggah: <b>' + esc(gagal.join(', ')) + '</b>. Silakan unggah ulang dari Portal Peserta.</div></div>' : '') +
     '<div class="row wrap" style="justify-content:center"><a class="btn btn-primary btn-lg" href="#/portal">' + icon('clipboard') + ' Buka Portal Status</a><a class="btn btn-secondary btn-lg" href="#/">Kembali ke Beranda</a></div>' +
     '</div></div>';
@@ -335,17 +395,46 @@ function renderRegSuccess(ev, reg, gagal) {
 // --------------------------------------------------------------------------
 // MASUK
 // --------------------------------------------------------------------------
+/** Modal minta kode akses (sekali per perangkat). Resolve(kode) atau reject saat dibatalkan. */
+function askKode(email) {
+  return new Promise(function (resolve, reject) {
+    var done = false;
+    var m = openModal({
+      title: 'Masukkan Kode Akses',
+      body: '<p class="small muted">Perangkat ini belum dikenali untuk <b>' + esc(email) + '</b>. Masukkan kode akses Anda <b>sekali saja</b> — berikutnya cukup satu ketukan.</p>' +
+        '<input class="input mono mt-16" id="ask-kode" maxlength="12" placeholder="8 karakter" style="text-transform:uppercase;letter-spacing:6px;font-size:22px;height:56px;text-align:center" autocomplete="one-time-code">' +
+        '<p class="xs muted mt-8">Lupa kode? Tutup jendela ini lalu gunakan tautan "Lupa kode?" di halaman masuk.</p>',
+      foot: '<button class="btn btn-secondary" data-close>Batal</button><button class="btn btn-primary" id="ask-ok">' + icon('check', 'ic-sm') + ' Lanjut</button>',
+      onClose: function () { if (!done) reject({}); }
+    });
+    var inp = $('#ask-kode', m.el); setTimeout(function () { inp.focus(); }, 50);
+    var go = function () { var v = inp.value.trim(); if (v.length < 6) return inp.classList.add('invalid'); done = true; m.close(); resolve(v); };
+    on($('#ask-ok', m.el), 'click', go);
+    on(inp, 'keydown', function (e) { if (e.key === 'Enter') go(); });
+  });
+}
+
 function pageMasuk(params, query) {
   if (S.user) return Router.go(S.isAdmin() ? '#/admin' : '#/portal');
   var tab = query.tab === 'admin' ? 'admin' : 'peserta';
+  var devs = Devices.list();
+  var mode = (API.peek(API.key('publicConfig', {})) || { d: { loginPeserta: 'perangkat' } }).d.loginPeserta;
+  var accHtml = function () {
+    devs = Devices.list();
+    return devs.length ? '<div class="stack-sm"><div class="xs muted bold" style="letter-spacing:.06em">MASUK CEPAT DI PERANGKAT INI</div>' + devs.map(function (dv) {
+      return '<div class="row"><button type="button" class="acc-card" data-acc="' + esc(dv.email) + '"><span class="avatar">' + esc(initials(dv.nama)) + '</span><div class="grow"><div class="bold ellipsis">Masuk sebagai ' + esc(dv.nama) + '</div><div class="xs muted ellipsis">' + esc(dv.email) + '</div></div>' + icon('arrowRight') + '</button>' +
+        '<button type="button" class="btn btn-ghost btn-icon" data-forget="' + esc(dv.email) + '" title="Lupakan akun di perangkat ini">' + icon('x', 'ic-sm') + '</button></div>';
+    }).join('') + '<div class="row small muted" style="gap:10px;margin:6px 0"><span class="grow" style="height:1px;background:var(--border)"></span>atau akun lain<span class="grow" style="height:1px;background:var(--border)"></span></div></div>' : '';
+  };
   Layout.public('<div class="auth-wrap"><div class="auth-card card card-pad stack">' +
     '<div class="center"><span class="brand-mark" style="width:48px;height:48px;margin:0 auto;border-radius:12px">' + icon('ticket', 'ic-lg') + '</span><h2 class="mt-16">Masuk ke ' + esc(CFG.APP_NAME) + '</h2><p class="small muted mt-8">Pilih jenis akun Anda</p></div>' +
     '<div class="tabs" role="tablist"><button data-tab="peserta" class="' + (tab === 'peserta' ? 'active' : '') + '">Peserta</button><button data-tab="admin" class="' + (tab === 'admin' ? 'active' : '') + '">Panitia / Operator</button></div>' +
-    '<form id="f-peserta" class="stack" ' + (tab === 'peserta' ? '' : 'hidden') + '>' +
+    '<div id="f-peserta-wrap" class="stack" ' + (tab === 'peserta' ? '' : 'hidden') + '><div id="acc-list">' + accHtml() + '</div>' +
+    '<form id="f-peserta" class="stack">' +
     '<div class="field"><label class="label">Email pendaftaran</label><div class="input-icon">' + icon('mail') + '<input class="input" name="email" type="email" required autocomplete="email" placeholder="nama@contoh.com"></div></div>' +
-    '<div class="field"><label class="label"><span>Kode akses</span><a href="#" id="lupa" class="xs">Lupa kode?</a></label><div class="input-icon">' + icon('key') + '<input class="input mono" name="kode" required maxlength="12" placeholder="8 karakter" style="text-transform:uppercase;letter-spacing:3px;font-size:15px"></div><span class="hint">Kode tampil setelah mendaftar dan dikirim ke email Anda.</span></div>' +
+    '<div class="field" id="kode-field"' + (mode === 'email' ? ' hidden' : '') + '><label class="label"><span>Kode akses</span><a href="#" id="lupa" class="xs">Lupa kode?</a></label><div class="input-icon">' + icon('key') + '<input class="input mono" name="kode" maxlength="12" placeholder="8 karakter" style="text-transform:uppercase;letter-spacing:3px;font-size:15px"></div><span class="hint" id="kode-hint">' + (mode === 'kode' ? 'Kode akses diminta setiap kali masuk.' : 'Cukup sekali di perangkat ini — berikutnya login 1-tap tanpa kode.') + '</span></div>' +
     '<button class="btn btn-primary btn-lg btn-block" type="submit">' + icon('login') + ' Masuk Portal Peserta</button>' +
-    '<p class="small muted center">Belum mendaftar? <a href="#/">Lihat daftar event</a></p></form>' +
+    '<p class="small muted center">Belum pernah mendaftar? <a href="#/">Lihat daftar event</a></p></form></div>' +
     '<form id="f-admin" class="stack" ' + (tab === 'admin' ? '' : 'hidden') + '>' +
     '<div class="field"><label class="label">Email panitia / operator</label><div class="input-icon">' + icon('mail') + '<input class="input" name="email" type="email" required autocomplete="username"></div></div>' +
     '<div class="field"><label class="label">Kata sandi</label><div class="input-icon">' + icon('lock') + '<input class="input" name="password" type="password" required autocomplete="current-password"></div></div>' +
@@ -353,10 +442,17 @@ function pageMasuk(params, query) {
     '<p class="xs muted center">Akun panitia dibuat oleh Operator — tidak tersedia pendaftaran mandiri.</p></form>' +
     '</div></div>');
 
+  API.swr('publicConfig', {}, function (c) {
+    mode = c.loginPeserta;
+    var kf = $('#kode-field'); if (!kf) return;
+    kf.hidden = mode === 'email';
+    $('#kode-hint').textContent = mode === 'kode' ? 'Kode akses diminta setiap kali masuk.' : 'Cukup sekali di perangkat ini — berikutnya login 1-tap tanpa kode.';
+  }).catch(function () {});
+
   $$('[data-tab]').forEach(function (b) {
     on(b, 'click', function () {
       $$('[data-tab]').forEach(function (x) { x.classList.toggle('active', x === b); });
-      $('#f-peserta').hidden = b.dataset.tab !== 'peserta';
+      $('#f-peserta-wrap').hidden = b.dataset.tab !== 'peserta';
       $('#f-admin').hidden = b.dataset.tab !== 'admin';
     });
   });
@@ -364,17 +460,40 @@ function pageMasuk(params, query) {
     var dest = Store.get('after_login', '');
     Store.del('after_login');
     PublicCache.set(null);
-    if (dest && ((S.isAdmin() && /^#\/(admin|operator)/.test(dest)) || (S.isPeserta() && /^#\/portal/.test(dest)))) return Router.go(dest);
+    if (dest && ((S.isAdmin() && /^#\/(admin|operator)/.test(dest)) || (S.isPeserta() && /^#\/(portal|daftar)/.test(dest)))) return Router.go(dest);
     Router.go(S.isAdmin() ? '#/admin' : '#/portal');
   };
+  var bindAcc = function () {
+    $$('[data-acc]').forEach(function (b) {
+      on(b, 'click', function () {
+        var dv = Devices.find(b.dataset.acc);
+        b.style.opacity = '.6'; b.querySelector('.ic:last-child').outerHTML = '<span class="spinner"></span>';
+        Devices.login(dv).then(function (d) { toast('Selamat datang, ' + d.user.nama + '!', 'ok'); after(); })
+          .catch(function (e) {
+            $('#acc-list').innerHTML = accHtml(); bindAcc();
+            if (e.code === 'NEED_KODE') { $('#f-peserta').email.value = dv.email; $('#kode-field').hidden = false; $('#f-peserta').kode.focus(); toast(e.message, 'warn'); }
+            else errToast(e);
+          });
+      });
+    });
+    $$('[data-forget]').forEach(function (b) { on(b, 'click', function () { Devices.remove(b.dataset.forget); $('#acc-list').innerHTML = accHtml(); bindAcc(); }); });
+  };
+  bindAcc();
+
   on($('#f-peserta'), 'submit', function (e) {
     e.preventDefault();
     var f = this, b = $('button[type=submit]', f);
     if (!f.reportValidity()) return;
+    var email = f.email.value.trim().toLowerCase(), kode = f.kode.value.trim();
+    var dev = Devices.find(email);
     btnLoading(b, true, 'Memeriksa…');
-    API.call('loginPeserta', { email: f.email.value, kode: f.kode.value }, { noRedirect: true })
-      .then(function (d) { S.setSession(d); toast('Selamat datang, ' + d.user.nama + '!', 'ok'); after(); })
-      .catch(function (err) { btnLoading(b, false); errToast(err); });
+    var p = (!kode && dev) ? Devices.login(dev) : API.call('loginPeserta', { email: email, kode: kode }, { noRedirect: true }).then(function (d) { S.setSession(d); return d; });
+    p.then(function (d) { toast('Selamat datang, ' + d.user.nama + '!', 'ok'); after(); })
+      .catch(function (err) {
+        btnLoading(b, false);
+        if (err.code === 'NEED_KODE') { $('#kode-field').hidden = false; f.kode.focus(); toast('Masukkan kode akses Anda (sekali di perangkat ini).', 'warn'); }
+        else errToast(err);
+      });
   });
   on($('#f-admin'), 'submit', function (e) {
     e.preventDefault();
@@ -382,7 +501,11 @@ function pageMasuk(params, query) {
     if (!f.reportValidity()) return;
     btnLoading(b, true, 'Memeriksa…');
     API.call('loginAdmin', { email: f.email.value, password: f.password.value }, { noRedirect: true })
-      .then(function (d) { S.setSession(d); EventCtx.list = null; toast('Selamat datang, ' + d.user.nama + '!', 'ok'); after(); })
+      .then(function (d) {
+        S.setSession(d); EventCtx.list = null; toast('Selamat datang, ' + d.user.nama + '!', 'ok');
+        API.prefetch('listEvents', {}); API.prefetch('adminDashboard', { eventId: '' });
+        after();
+      })
       .catch(function (err) { btnLoading(b, false); errToast(err); });
   });
   on($('#lupa'), 'click', function (e) {

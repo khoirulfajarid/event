@@ -38,9 +38,13 @@ function eventScoped(active, crumb, title, sub, rid, build) {
 function pageAdminDashboard(params, query, rid) {
   Layout.app(skeleton(5), 'dashboard');
   var filter = query.event || '';
-  return Promise.all([EventCtx.load(true), API.call('adminDashboard', { eventId: filter })]).then(function (res) {
+  return API.swrAll([['listEvents', {}], ['adminDashboard', { eventId: filter }]], function (res) {
     if (!Router.alive(rid)) return;
-    var list = res[0], d = res[1], r = d.ringkasan;
+    var list = res[0].events, d = res[1], r = d.ringkasan;
+    EventCtx.list = list;
+    Layout.pending = list.reduce(function (a, e) { return a + (e.stat ? e.stat.menunggu : 0); }, 0);
+    // halaman lain yang sering dibuka dimuat di latar → terbuka instan
+    setTimeout(function () { var ce = Store.get('ctx_event', '') || (list[0] || {}).id; if (ce) { API.prefetch('listPendaftar', { eventId: ce }); API.prefetch('listSesi', { eventId: ce }); } }, 800);
     Layout.app('', 'dashboard');
     var sel = '<div class="ctx-select">' + icon('filter', 'ic-sm') + '<select class="select" id="dash-ev"><option value="">Semua event (' + list.length + ')</option>' +
       list.map(function (e) { return '<option value="' + esc(e.id) + '"' + (e.id === filter ? ' selected' : '') + '>' + esc(e.nama) + '</option>'; }).join('') + '</select></div>' +
@@ -93,7 +97,7 @@ function pageAdminDashboard(params, query, rid) {
 // --------------------------------------------------------------------------
 function pageAdminEvents(params, query, rid) {
   Layout.app(skeleton(4), 'events', { search: 'Cari event…' });
-  return EventCtx.load(true).then(function (list) {
+  return EventCtx.load().then(function (list) {
     if (!Router.alive(rid)) return;
     var status = query.status || '';
     var render = function () {
@@ -139,7 +143,7 @@ var SYARAT_PRESET = {
 function pageEventForm(params, query, rid) {
   var isNew = !params.id;
   Layout.app(skeleton(4), 'events');
-  return EventCtx.load(!isNew).then(function (list) {
+  return EventCtx.load().then(function (list) {
     if (!Router.alive(rid)) return;
     var ev = isNew ? {
       nama: '', kode: '', kategori: '', deskripsi: '', pembicara: '', lokasi: '', tanggal_mulai: '', tanggal_selesai: '', jam: '08:00 - 16:00', batas_daftar: '',
@@ -255,7 +259,7 @@ function pageAdminVerifikasi(params, query, rid) {
   var state = { page: 1, q: '', status: query.status || '', bayar: '', selected: {} };
   return eventScoped('verifikasi', 'SIM Management <span>/</span> <b>Committee Review</b>', 'Verifikasi Syarat & Pembayaran', 'Tinjau bukti dari pendaftar, setujui atau minta perbaikan per syarat.', rid, function (list, ev) {
     var load = function () {
-      return API.call('listPendaftar', { eventId: ev.id }).then(function (d) {
+      return API.swr('listPendaftar', { eventId: ev.id }, function (d) {
         if (!Router.alive(rid)) return;
         draw(d);
       });
@@ -328,7 +332,7 @@ function openPendaftarDrawer(id, onChange) {
   m.close = function () { origClose(); if (changed && onChange) onChange(); };
 
   var render = function () {
-    API.call('getPendaftarDetail', { id: id }).then(function (d) {
+    API.swr('getPendaftarDetail', { id: id }, function (d) {
       var p = d.pendaftar;
       var sesiWajib = d.event.sesi_wajib;
       m.body(
@@ -395,7 +399,7 @@ function openPendaftarDrawer(id, onChange) {
 function pageAdminPembayaran(params, query, rid) {
   var state = { status: 'menunggu', q: '', page: 1 };
   return eventScoped('pembayaran', 'Committee Review <span>/</span> <b>Pembayaran</b>', 'Dashboard Pembayaran', 'Konfirmasi bukti transfer peserta. Status lunas otomatis menyetujui syarat pembayaran.', rid, function (list, ev) {
-    var load = function () { return API.call('listPembayaran', { eventId: ev.id }).then(function (d) { if (Router.alive(rid)) draw(d); }); };
+    var load = function () { return API.swr('listPembayaran', { eventId: ev.id }, function (d) { if (Router.alive(rid)) draw(d); }); };
     var draw = function (d) {
       var r = d.ringkasan;
       if (!d.event.biaya && !r.total) {
@@ -449,7 +453,7 @@ function pageAdminPembayaran(params, query, rid) {
 function pageAdminLeads(params, query, rid) {
   Layout.app(skeleton(4), 'leads');
   var state = { ev: query.event || '', st: '', q: '', page: 1 };
-  return API.call('listLeads', {}).then(function (d) {
+  return API.swr('listLeads', {}, function (d) {
     if (!Router.alive(rid)) return;
     var draw = function () {
       var rows = d.leads.filter(function (l) { return (!state.ev || l.event_id === state.ev) && (!state.st || l.status_leads === state.st) && (!state.q || (l.nama + l.email + l.institusi + l.hp).toLowerCase().indexOf(state.q) > -1); });
@@ -570,7 +574,7 @@ function pageAdminSesi(params, query, rid) {
   return eventScoped('sesi', 'Pelaksanaan <span>/</span> <b>Sesi & Absensi</b>', 'Sesi & Absensi QR', 'Buka sesi, tampilkan QR dinamis di layar/proyektor, dan pantau kehadiran peserta secara langsung.', rid, function (list, ev) {
     var state = { q: '', page: 1 };
     var load = function () {
-      return Promise.all([API.call('listSesi', { eventId: ev.id }), API.call('listAbsensi', { eventId: ev.id })]).then(function (res) {
+      return API.swrAll([['listSesi', { eventId: ev.id }], ['listAbsensi', { eventId: ev.id }]], function (res) {
         if (Router.alive(rid)) draw(res[0], res[1]);
       });
     };
@@ -590,6 +594,7 @@ function pageAdminSesi(params, query, rid) {
             '<div class="progress"><span style="width:' + pct(x.hadir, s.peserta_lolos) + '%"></span></div>' +
             '<div class="row wrap"><button class="btn ' + (open ? 'btn-danger' : 'btn-accent') + ' btn-sm" data-toggle="' + esc(x.id) + '" data-to="' + (open ? 'tutup' : 'buka') + '">' + icon(open ? 'lock' : 'unlock', 'ic-sm') + ' ' + (open ? 'Tutup Sesi' : 'Buka Sesi') + '</button>' +
             '<button class="btn btn-navy btn-sm" data-qr="' + esc(x.id) + '">' + icon('qr', 'ic-sm') + ' Tampilkan QR</button>' +
+            '<a class="btn btn-secondary btn-sm" href="#/admin/scanner?sesi=' + esc(x.id) + '" title="Pindai Kartu QR peserta beruntun">' + icon('scan', 'ic-sm') + ' Scanner Kios</a>' +
             '<button class="btn btn-ghost btn-sm btn-icon" data-edit-sesi="' + esc(x.id) + '" title="Edit">' + icon('edit', 'ic-sm') + '</button>' +
             (x.hadir ? '' : '<button class="btn btn-ghost btn-sm btn-icon" data-del-sesi="' + esc(x.id) + '" title="Hapus">' + icon('trash', 'ic-sm') + '</button>') + '</div></div>';
         }).join('') + '</div>' +
@@ -637,7 +642,7 @@ function pageAdminSesi(params, query, rid) {
 // --------------------------------------------------------------------------
 function pageAdminEvaluasi(params, query, rid) {
   return eventScoped('evaluasi', 'Pelaksanaan <span>/</span> <b>Evaluasi</b>', 'Hasil Evaluasi Event', 'Rekap penilaian peserta untuk kalibrasi materi, pembicara, dan operasional.', rid, function (list, ev) {
-    return API.call('listEvaluasi', { eventId: ev.id }).then(function (d) {
+    return API.swr('listEvaluasi', { eventId: ev.id }, function (d) {
       if (!Router.alive(rid)) return;
       var labels = { kualitas: 'Kualitas event', materi: 'Materi & pembicara', workshop: 'Praktik / diskusi', registrasi: 'Registrasi & check-in', audio: 'Audio visual', portal: 'Portal & scan absensi' };
       var rekLabel = { pasti: 'Pasti', mungkin: 'Mungkin', ragu: 'Ragu-ragu', tidak: 'Tidak' };
@@ -666,74 +671,358 @@ function pageAdminEvaluasi(params, query, rid) {
 // SERTIFIKAT
 // --------------------------------------------------------------------------
 function pageAdminSertifikat(params, query, rid) {
-  return eventScoped('sertifikat', 'Pelaksanaan <span>/</span> <b>Sertifikat</b>', 'Generate Sertifikat', 'Atur template Google Slides/Docs, lalu terbitkan sertifikat bernomor unik secara batch.', rid, function (list, ev) {
-    var state = { q: '', page: 1 };
-    var load = function () { return API.call('listSertifikat', { eventId: ev.id }).then(function (d) { if (Router.alive(rid)) draw(d); }); };
-    var draw = function (d) {
-      var e = d.event, r = d.ringkasan;
-      var ttd = (e.penandatangan || []).concat([{ nama: '', jabatan: '' }, { nama: '', jabatan: '' }]).slice(0, 2);
+  var tab = query.tab === 'desain' ? 'desain' : 'daftar';
+  return eventScoped('sertifikat', 'Pelaksanaan <span>/</span> <b>Sertifikat</b>', 'Sertifikat Peserta', 'Desain sertifikat per event, lalu terbitkan PDF (persis pratinjau) dan kirim ke email peserta.', rid, function (list, ev) {
+    var state = { q: '', page: 1, running: false, stop: false };
+    var tabs = function () {
+      return '<div class="tabs-line"><button data-tab="daftar" class="' + (tab === 'daftar' ? 'active' : '') + '">' + icon('list', 'ic-sm') + ' Daftar & Kirim</button><button data-tab="desain" class="' + (tab === 'desain' ? 'active' : '') + '">' + icon('edit', 'ic-sm') + ' Desain Sertifikat</button></div>';
+    };
+    var bindTabs = function () {
+      $$('[data-tab]').forEach(function (b) { on(b, 'click', function () { if (state.running) return toast('Tunggu proses PDF selesai.', 'warn'); tab = b.dataset.tab; history.replaceState(null, '', '#/admin/sertifikat?tab=' + tab); render(); }); });
+    };
+    var render = function () { return tab === 'desain' ? renderDesain() : renderDaftar(); };
+
+    // ------------------------- DAFTAR & KIRIM -------------------------
+    var renderDaftar = function () {
+      return API.swr('listSertifikat', { eventId: ev.id }, function (d) {
+        if (!Router.alive(rid) || tab !== 'daftar' || state.running) return;
+        drawDaftar(d);
+      });
+    };
+    var rowData = function (assets, x) { return CertDesign.data(assets, { nama: x.nama, institusi: x.institusi, nomor: x.nomor, tanggal_terbit: x.tanggal_terbit }); };
+    var drawDaftar = function (d) {
+      var r = d.ringkasan;
       var rows = d.sertifikat.filter(function (x) { return !state.q || (x.nama + x.nomor + x.email).toLowerCase().indexOf(state.q) > -1; });
       var pg = paginate(rows, state.page);
-      $('#scoped').innerHTML = '<div class="grid-4">' +
+      $('#scoped').innerHTML = tabs() + '<div class="grid-4">' +
         kpiCard('Siap Diterbitkan', num(r.siap_dibuat), 'lolos + hadir + evaluasi', 'sparkle', r.siap_dibuat ? 'var(--warning)' : '') +
-        kpiCard('Terbit', num(r.terbit), 'PDF tersimpan di Drive', 'award', 'var(--accent-dark)') +
-        kpiCard('Antrean', num(r.antri), 'diproses per ' + d.batch + ' / batch', 'layers') +
-        kpiCard('Gagal', num(r.gagal), r.gagal ? 'periksa template' : 'tidak ada', 'alertCircle', r.gagal ? '#b91c1c' : '') + '</div>' +
-        '<div class="split mt-24"><div class="card"><div class="card-head"><div><h3>Daftar Sertifikat</h3><p class="small muted">Nomor: PREFIX/' + esc(e.kode) + '/TAHUN/URUT</p></div><div class="row wrap"><div class="input-icon" style="min-width:200px">' + icon('search') + '<input class="input" id="c-q" placeholder="Cari nama / nomor" value="' + esc(state.q) + '"></div>' +
-        '<button class="btn btn-primary" id="c-gen"' + (r.siap_dibuat + r.antri + r.gagal ? '' : ' disabled') + '>' + icon('zap', 'ic-sm') + ' Proses (' + (r.siap_dibuat + r.antri + r.gagal) + ')</button></div></div>' +
-        '<div id="c-prog"></div><div class="table-wrap"><table class="table"><thead><tr><th>Peserta</th><th>Nomor</th><th>Status</th><th>Email</th><th class="right">Aksi</th></tr></thead><tbody>' +
+        kpiCard('Nomor Terbit', num(r.total), 'tercatat & bisa diverifikasi', 'award', 'var(--accent-dark)') +
+        kpiCard('PDF Terarsip', num(r.pdf), r.belum_pdf ? r.belum_pdf + ' belum dibuat' : 'lengkap', 'fileText', r.belum_pdf ? 'var(--warning)' : 'var(--accent-dark)') +
+        kpiCard('Email Terkirim', num(r.terkirim), 'lampiran PDF', 'mail') + '</div>' +
+        '<div class="toolbar mt-24"><div class="input-icon">' + icon('search') + '<input class="input input-soft" id="c-q" placeholder="Cari nama / nomor / email" value="' + esc(state.q) + '"></div>' +
+        (r.siap_dibuat ? '<button class="btn btn-secondary" id="c-gen">' + icon('sparkle', 'ic-sm') + ' Terbitkan Nomor (' + r.siap_dibuat + ')</button>' : '') +
+        '<button class="btn btn-primary" id="c-pdf"' + (r.belum_pdf ? '' : ' disabled') + '>' + icon('send', 'ic-sm') + ' Buat & Kirim PDF (' + r.belum_pdf + ')</button>' +
+        '<button class="btn btn-ghost" id="c-redo"' + (r.total ? '' : ' disabled') + ' title="Buat ulang PDF semua peserta dengan desain terbaru">' + icon('refresh', 'ic-sm') + ' Buat Ulang Semua</button></div>' +
+        '<div id="c-prog" class="mt-16"></div>' +
+        '<div class="card mt-16"><div class="table-wrap"><table class="table"><thead><tr><th>Peserta</th><th>Nomor</th><th>PDF</th><th>Email</th><th class="right">Aksi</th></tr></thead><tbody>' +
         (pg.items.length ? pg.items.map(function (x) {
-          return '<tr><td><div class="cell-name">' + esc(x.nama) + '</div><div class="xs muted">' + esc(x.email) + '</div></td><td class="mono nowrap">' + esc(x.nomor) + '</td>' +
-            '<td>' + statusBadge(x.status) + (x.tanggal_terbit ? '<div class="xs muted mt-8">' + esc(fmtDateTime(x.tanggal_terbit)) + '</div>' : '') + (x.pesan_error ? '<div class="xs" style="color:#b91c1c;max-width:220px">' + esc(x.pesan_error) + '</div>' : '') + '</td>' +
-            '<td class="xs">' + esc(x.status_email || '-') + '</td>' +
-            '<td class="right nowrap">' + (x.file_id ? '<button class="btn btn-secondary btn-xs" data-cprev="' + esc(x.file_id) + '" data-label="' + esc(x.nomor) + '">' + icon('eye', 'ic-sm') + '</button> <button class="btn btn-secondary btn-xs" data-mail="' + esc(x.id) + '" title="Kirim ulang email">' + icon('send', 'ic-sm') + '</button> ' : '') +
-            (x.status === 'terbit' ? '<button class="btn btn-ghost btn-xs" data-regen="' + esc(x.id) + '" title="Terbitkan ulang">' + icon('refresh', 'ic-sm') + '</button>' : '') + '</td></tr>';
-        }).join('') : '<tr><td colspan="5">' + emptyState('award', 'Belum ada sertifikat', 'Sertifikat terbit otomatis saat peserta mengirim evaluasi, atau klik Proses.') + '</td></tr>') +
-        '</tbody></table></div><div class="card-foot">' + pagerHtml(pg) + '</div></div>' +
-        '<aside class="stack"><div class="card card-pad stack"><h4>Template Sertifikat</h4>' +
-        '<div class="segmented" style="width:100%"><button class="' + (e.template_tipe === 'bawaan' ? 'active' : '') + '" data-tt="bawaan">Desain Bawaan</button><button class="' + (e.template_tipe !== 'bawaan' ? 'active' : '') + '" data-tt="custom">Google Slides / Docs</button></div>' +
-        '<div id="tt-custom"' + (e.template_tipe === 'bawaan' ? ' hidden' : '') + ' class="stack-sm"><div class="field"><label class="label">Tautan template</label><input class="input" id="tpl" placeholder="https://docs.google.com/presentation/d/…" value="' + esc(e.template_url) + '"></div>' +
-        (e.template_url ? '<a class="small" href="' + esc(e.template_url) + '" target="_blank" rel="noopener">' + icon('external', 'ic-sm') + ' Buka & kustom template</a>' : '') +
-        '<button class="btn btn-light btn-sm" id="tpl-new">' + icon('sparkle', 'ic-sm') + ' Buat Template Contoh (Slides)</button>' +
-        '<p class="xs muted">Bagikan file ke akun pemilik Apps Script. Letakkan placeholder berikut di mana saja pada desain Anda:</p>' +
-        '<div class="row wrap" style="gap:4px">' + d.placeholder.map(function (p) { return '<button class="badge b-gray" style="border:0;cursor:pointer" data-ph="' + esc(p) + '" title="Salin">' + esc(p) + '</button>'; }).join('') + '</div></div>' +
-        '<div class="field"><label class="label">Penandatangan</label>' + ttd.map(function (t, i) { return '<div class="grid-2" style="gap:6px;margin-bottom:6px"><input class="input" data-tn="' + i + '" placeholder="Nama" value="' + esc(t.nama) + '"><input class="input" data-tj="' + i + '" placeholder="Jabatan" value="' + esc(t.jabatan) + '"></div>'; }).join('') + '</div>' +
-        '<button class="btn btn-primary btn-block" id="tpl-save">' + icon('check', 'ic-sm') + ' Simpan Pengaturan</button></div>' +
-        '<div class="card card-pad-sm small stack-sm"><b>' + icon('info', 'ic-sm') + ' Syarat terbit</b><span class="muted">Lolos verifikasi → absensi ' + (list.filter(function (x) { return x.id === ev.id; })[0] || {}).sesi_wajib + ' sesi → evaluasi terkirim. Proses berjalan per batch agar aman dari batas 6 menit Apps Script.</span></div></aside></div>';
-
-      var mode = e.template_tipe === 'bawaan' ? 'bawaan' : 'custom';
-      $$('[data-tt]').forEach(function (b) { on(b, 'click', function () { mode = b.dataset.tt; $$('[data-tt]').forEach(function (x) { x.classList.toggle('active', x === b); }); $('#tt-custom').hidden = mode === 'bawaan'; }); });
-      $$('[data-ph]').forEach(function (b) { on(b, 'click', function () { copyText(b.dataset.ph, 'Placeholder'); }); });
-      on($('#tpl-save'), 'click', function () {
-        var b = this; btnLoading(b, true);
-        API.act('saveTemplate', { eventId: ev.id, template: mode === 'bawaan' ? '' : $('#tpl').value.trim(), penandatangan: [0, 1].map(function (i) { return { nama: $('[data-tn="' + i + '"]').value, jabatan: $('[data-tj="' + i + '"]').value }; }) })
-          .then(function () { EventCtx.list = null; load(); }).catch(function (err) { btnLoading(b, false); errToast(err); });
+          return '<tr><td><div class="cell-name">' + esc(x.nama) + '</div><div class="xs muted">' + esc(x.email) + '</div></td><td class="mono nowrap">' + esc(x.nomor) + '<div class="xs muted">' + esc(fmtDate(x.tanggal_terbit)) + '</div></td>' +
+            '<td>' + (x.ada_pdf ? badge('Terarsip', 'green', true) : badge('Belum', 'amber', true)) + '</td>' +
+            '<td class="xs">' + (x.status_email === 'terkirim' ? badge('Terkirim', 'blue') : esc(x.status_email || '-')) + '</td>' +
+            '<td class="right nowrap"><button class="btn btn-secondary btn-xs" data-view="' + esc(x.id) + '" title="Pratinjau">' + icon('eye', 'ic-sm') + '</button> ' +
+            '<button class="btn btn-secondary btn-xs" data-dl="' + esc(x.id) + '" title="Unduh PDF">' + icon('download', 'ic-sm') + '</button> ' +
+            '<button class="btn btn-secondary btn-xs" data-one="' + esc(x.id) + '" title="' + (x.ada_pdf ? 'Buat ulang & kirim ulang' : 'Buat PDF & kirim') + '">' + icon('send', 'ic-sm') + '</button></td></tr>';
+        }).join('') : '<tr><td colspan="5">' + emptyState('award', 'Belum ada sertifikat', 'Nomor sertifikat terbit otomatis saat peserta mengirim evaluasi.') + '</td></tr>') +
+        '</tbody></table></div><div class="card-foot">' + pagerHtml(pg) + '</div></div>';
+      bindTabs();
+      var find = function (id) { return d.sertifikat.filter(function (x) { return x.id === id; })[0]; };
+      on($('#c-q'), 'change', function () { state.q = this.value.toLowerCase(); state.page = 1; drawDaftar(d); });
+      $$('[data-page]').forEach(function (b) { on(b, 'click', function () { state.page = +b.dataset.page; drawDaftar(d); }); });
+      on($('#c-gen'), 'click', function () { var b = this; btnLoading(b, true); API.act('generateSertifikat', { eventId: ev.id }).then(renderDaftar).catch(function (e) { btnLoading(b, false); errToast(e); }); });
+      $$('[data-view]').forEach(function (b) {
+        on(b, 'click', function () {
+          var x = find(b.dataset.view);
+          var m = openModal({ title: 'Pratinjau — ' + x.nama, size: 'xl', body: '<div id="pv-host"><div class="skel" style="aspect-ratio:1123/794"></div></div>' });
+          CertAssets.get(ev.id, d.desainVersi).then(function (a) { CertDesign.mount($('#pv-host', m.el), rowData(a, x)); }).catch(errToast);
+        });
       });
-      on($('#tpl-new'), 'click', function () {
-        var b = this; btnLoading(b, true, 'Membuat…');
-        API.act('buatTemplateContoh', { eventId: ev.id }).then(function (res) { window.open(res.data.url, '_blank', 'noopener'); load(); }).catch(function (err) { btnLoading(b, false); errToast(err); });
+      $$('[data-dl]').forEach(function (b) {
+        on(b, 'click', function () {
+          var x = find(b.dataset.dl); btnLoading(b, true);
+          CertAssets.get(ev.id, d.desainVersi).then(function (a) { var dd = rowData(a, x); return CertDesign.toPdf(dd).then(function (blob) { downloadBlob(blob, CertDesign.fileName(dd)); }); })
+            .catch(errToast).then(function () { btnLoading(b, false); });
+        });
       });
-      var runBatch = function (payload) {
-        var b = $('#c-gen'); btnLoading(b, true, 'Memproses…');
-        var total = 0;
-        var step = function () {
-          $('#c-prog').innerHTML = '<div class="alert alert-info" style="border-radius:0;border-width:1px 0">' + '<span class="spinner"></span><div class="small">Menerbitkan sertifikat… ' + total + ' selesai. Jangan tutup halaman.</div></div>';
-          return API.call('generateSertifikat', payload, { timeout: 330000 }).then(function (res) {
-            total += res.terbit;
-            payload = { eventId: ev.id };
-            if (res.sisa > 0 && res.terbit > 0) return step();
-            toast(total + ' sertifikat terbit' + (res.gagal ? ', ' + res.gagal + ' gagal: ' + res.error : '') + '.', res.gagal ? 'warn' : 'ok', 6000);
-          });
+      var runPdf = function (targets, kirimUlang) {
+        if (!targets.length) return;
+        state.running = true; state.stop = false;
+        var done = 0, gagal = 0, sent = 0, idx = 0;
+        var prog = function () {
+          $('#c-prog').innerHTML = '<div class="card card-pad-sm stack-sm"><div class="row between wrap"><b>' + icon('fileText', 'ic-sm') + ' Membuat PDF & mengirim… ' + done + '/' + targets.length + '</b><span class="small muted">' + sent + ' email terkirim' + (gagal ? ' · ' + gagal + ' gagal' : '') + '</span><button class="btn btn-danger btn-xs" id="c-stop">Hentikan</button></div>' +
+            '<div class="progress lg navy"><span style="width:' + pct(done, targets.length) + '%"></span></div><p class="xs muted">PDF dirender di browser ini (identik pratinjau) — biarkan halaman tetap terbuka.</p></div>';
+          on($('#c-stop'), 'click', function () { state.stop = true; });
         };
-        step().catch(errToast).then(load);
+        prog();
+        CertAssets.get(ev.id, d.desainVersi).then(function (a) {
+          var worker = function () {
+            if (state.stop || idx >= targets.length || !Router.alive(rid)) return Promise.resolve();
+            var x = targets[idx++];
+            return CertDesign.toPdf(rowData(a, x)).then(CertDesign.blobToBase64).then(function (b64) {
+              return API.call('uploadSertifikatPdf', { sertId: x.id, base64: b64, kirimUlang: !!kirimUlang }, { timeout: 120000 });
+            }).then(function (res) { if (res.status_email === 'terkirim') sent++; }, function () { gagal++; })
+              .then(function () { done++; if ($('#c-prog')) prog(); return worker(); });
+          };
+          return Promise.all([worker(), worker()]); // 2 paralel: cepat tanpa membebani kuota
+        }).catch(errToast).then(function () {
+          state.running = false;
+          toast(done + ' PDF sertifikat diproses, ' + sent + ' email terkirim' + (gagal ? ', ' + gagal + ' gagal' : '') + '.', gagal ? 'warn' : 'ok', 6000);
+          if (Router.alive(rid)) renderDaftar();
+        });
       };
-      on($('#c-gen'), 'click', function () { runBatch({ eventId: ev.id }); });
-      $$('[data-regen]').forEach(function (b) { on(b, 'click', function () { confirmDialog({ title: 'Terbitkan ulang?', message: 'PDF akan dibuat ulang dengan template & data terbaru. Nomor tetap sama.', ok: 'Terbitkan Ulang' }).then(function (ok) { if (ok) runBatch({ eventId: ev.id, ulang: true, ids: [b.dataset.regen] }); }); }); });
-      $$('[data-cprev]').forEach(function (b) { on(b, 'click', function () { previewFile(b.dataset.cprev, b.dataset.label); }); });
-      $$('[data-mail]').forEach(function (b) { on(b, 'click', function () { btnLoading(b, true); API.act('kirimUlangSertifikat', { id: b.dataset.mail }).then(load).catch(function (err) { btnLoading(b, false); errToast(err); }); }); });
-      on($('#c-q'), 'change', function () { state.q = this.value.toLowerCase(); state.page = 1; draw(d); });
-      $$('[data-page]').forEach(function (b) { on(b, 'click', function () { state.page = +b.dataset.page; draw(d); }); });
+      on($('#c-pdf'), 'click', function () { runPdf(d.sertifikat.filter(function (x) { return !x.ada_pdf; }), false); });
+      on($('#c-redo'), 'click', function () {
+        confirmDialog({ title: 'Buat ulang semua PDF?', message: 'PDF seluruh ' + d.sertifikat.length + ' peserta dibuat ulang dengan desain terbaru dan dikirim ulang ke email masing-masing (memakai kuota email).', ok: 'Buat Ulang & Kirim' })
+          .then(function (ok) { if (ok) runPdf(d.sertifikat.slice(), true); });
+      });
+      $$('[data-one]').forEach(function (b) { on(b, 'click', function () { var x = find(b.dataset.one); runPdf([x], x.ada_pdf); }); });
     };
-    return load();
+
+    // ------------------------- DESAIN -------------------------
+    var renderDesain = function () {
+      $('#scoped').innerHTML = tabs() + skeleton(2);
+      bindTabs();
+      return CertAssets.get(ev.id).then(function (assets) {
+        if (!Router.alive(rid) || tab !== 'desain') return;
+        var A = JSON.parse(JSON.stringify(assets));
+        var sample = { nama: 'Khoirul Fajar', institusi: 'STIS Al Wafa', nomor: String(A.desain && ev.kode ? 'SIMEV/' + ev.kode + '/' + String(ev.tanggal_mulai || '').slice(0, 4) + '/0001' : ''), tanggal_terbit: '' };
+        var ds = A.desain;
+        var slot = function (jenis, label, hint) {
+          var uri = A.aset[jenis];
+          return '<div class="field"><label class="label">' + label + '</label><div class="asset-slot"><span class="asset-thumb" id="th-' + jenis + '" style="background-image:' + (uri ? 'url(' + uri + ')' : 'none') + '"></span>' +
+            '<div class="grow xs muted">' + hint + '</div>' +
+            '<label class="btn btn-secondary btn-xs" style="position:relative;overflow:hidden">' + icon('upload', 'ic-sm') + ' ' + (uri ? 'Ganti' : 'Unggah') + '<input type="file" accept="image/png,image/jpeg,image/webp" data-asset="' + jenis + '" style="position:absolute;inset:0;opacity:0;cursor:pointer"></label>' +
+            (uri ? '<button class="btn btn-ghost btn-xs" data-del-asset="' + jenis + '" title="Hapus">' + icon('trash', 'ic-sm') + '</button>' : '') + '</div></div>';
+        };
+        var tx = function (k, label, ph) { return '<div class="field"><label class="label">' + label + '</label><input class="input" data-ds="' + k + '" value="' + esc(ds[k] || '') + '" placeholder="' + esc(ph || '') + '"></div>'; };
+        $('#scoped').innerHTML = tabs() + '<div class="design-grid"><div class="stack" style="position:sticky;top:80px">' +
+          '<div class="card card-pad"><div class="row between mb-16"><div><h3>Pratinjau Langsung</h3><p class="small muted">Tampilan ini = PDF yang diunduh & dikirim ke peserta (A4 landscape).</p></div><span id="ds-versi">' + badge('Versi ' + ds.versi, 'gray') + '</span></div><div id="dz-prev"></div></div>' +
+          '<div class="alert alert-info small">' + icon('info', 'ic-sm') + '<span>Tanda tangan paling bagus berupa <b>PNG latar transparan</b> (±800×300 px). Background ideal <b>A4 landscape 2246×1588 px</b>; atur <i>kecerahan lapisan</i> agar teks tetap terbaca.</span></div></div>' +
+          '<div class="card card-pad stack"><h3>Pengaturan Desain</h3>' +
+          '<div class="grid-2" style="gap:10px">' + tx('penerbit', 'Nama penerbit') + tx('subjudul', 'Sub-judul penerbit') + '</div>' +
+          slot('logo', 'Logo lembaga', 'PNG transparan, kotak. Kosong = ikon bawaan.') +
+          '<div class="grid-2" style="gap:10px">' + tx('judul', 'Judul sertifikat') + tx('pengantar', 'Kalimat pengantar') + '</div>' +
+          '<div class="field"><label class="label"><span>Deskripsi</span><span class="xs muted">{institusi} {sesi} {event} {tanggal} {nama} {kategori}</span></label><textarea class="textarea" rows="3" data-ds="deskripsi">' + esc(ds.deskripsi) + '</textarea></div>' +
+          '<div class="grid-2" style="gap:10px">' + tx('kategori', 'Kategori / predikat') + '<div class="field"><label class="label">Warna utama</label><input type="color" class="input" data-ds="warna" value="' + esc(ds.warna) + '" style="padding:4px;height:42px"></div></div>' +
+          '<div class="divider" style="margin:4px 0"></div><h4>Background</h4>' + slot('bg', 'Gambar background event', 'JPG/PNG. Dipotong otomatis memenuhi A4.') +
+          '<div class="field" id="ov-field"' + (A.aset.bg ? '' : ' hidden') + '><label class="label"><span>Kecerahan lapisan putih</span><b id="ov-val">' + Math.round(ds.overlay * 100) + '%</b></label><input type="range" min="0" max="100" step="5" value="' + Math.round(ds.overlay * 100) + '" data-ds="overlay"></div>' +
+          '<div class="divider" style="margin:4px 0"></div><h4>Penandatangan</h4>' +
+          [0, 1].map(function (i) {
+            return '<div class="q-box stack-sm"><b class="small">Pejabat ' + (i + 1) + '</b><div class="grid-2" style="gap:8px"><input class="input" data-ttd="' + i + '" data-f="nama" value="' + esc(ds.ttd[i].nama) + '" placeholder="Nama & gelar"><input class="input" data-ttd="' + i + '" data-f="jabatan" value="' + esc(ds.ttd[i].jabatan) + '" placeholder="Jabatan"></div>' +
+              slot('ttd' + (i + 1), 'Tanda tangan (PNG)', 'Kosong = coretan dekoratif.') + '</div>';
+          }).join('') +
+          '<button class="btn btn-primary btn-lg btn-block" id="ds-save">' + icon('check') + ' Simpan Desain</button></div></div>';
+        bindTabs();
+
+        var preview = debounce(function () { if ($('#dz-prev')) CertDesign.mount($('#dz-prev'), CertDesign.data(A, sample)); }, 120);
+        CertDesign.mount($('#dz-prev'), CertDesign.data(A, sample));
+        $$('[data-ds]').forEach(function (el) {
+          on(el, 'input', function () {
+            var k = el.dataset.ds;
+            ds[k] = k === 'overlay' ? Number(el.value) / 100 : el.value;
+            if (k === 'overlay') $('#ov-val').textContent = el.value + '%';
+            preview();
+          });
+        });
+        $$('[data-ttd]').forEach(function (el) { on(el, 'input', function () { ds.ttd[+el.dataset.ttd][el.dataset.f] = el.value; preview(); }); });
+        var opts = { bg: { max: 2400, format: 'jpeg' }, logo: { max: 600, format: 'png' }, ttd1: { max: 900, format: 'png' }, ttd2: { max: 900, format: 'png' } };
+        var afterAsset = function (jenis, uri, versi) {
+          A.aset[jenis] = uri; ds.versi = versi; CertAssets.clear();
+          var th = $('#th-' + jenis); if (th) th.style.backgroundImage = uri ? 'url(' + uri + ')' : 'none';
+          if (jenis === 'bg') $('#ov-field').hidden = !uri;
+          preview();
+        };
+        $$('[data-asset]').forEach(function (inp) {
+          on(inp, 'change', function () {
+            var f = inp.files[0], jenis = inp.dataset.asset; if (!f) return;
+            prepareImage(f, opts[jenis]).then(function (img) {
+              afterAsset(jenis, img.dataUri, ds.versi); // pratinjau instan (optimistic)
+              return API.act('uploadCertAsset', { eventId: ev.id, jenis: jenis, file: img });
+            }).then(function (res) { ds.versi = res.data.versi; CertAssets.clear(); $('#ds-versi').innerHTML = badge('Versi ' + ds.versi, 'gray'); }).catch(function (e) { errToast(e); renderDesain(); });
+          });
+        });
+        $$('[data-del-asset]').forEach(function (b) {
+          on(b, 'click', function () {
+            var jenis = b.dataset.delAsset;
+            afterAsset(jenis, '', ds.versi);
+            API.act('uploadCertAsset', { eventId: ev.id, jenis: jenis }).then(function () { renderDesain(); }).catch(errToast);
+          });
+        });
+        on($('#ds-save'), 'click', function () {
+          var b = this; btnLoading(b, true, 'Menyimpan…');
+          API.act('saveCertDesign', { eventId: ev.id, judul: ds.judul, pengantar: ds.pengantar, penerbit: ds.penerbit, subjudul: ds.subjudul, kategori: ds.kategori, deskripsi: ds.deskripsi, warna: ds.warna, overlay: ds.overlay, ttd: ds.ttd })
+            .then(function (res) { CertAssets.clear(); btnLoading(b, false); if (res.data) { ds.versi = res.data.versi; $('#ds-versi').innerHTML = badge('Versi ' + ds.versi, 'gray'); } toast('PDF yang sudah terarsip memakai desain lama — gunakan "Buat Ulang Semua" bila perlu.', 'warn', 6000); })
+            .catch(function (e) { btnLoading(b, false); errToast(e); });
+        });
+      }).catch(function (e) { $('#scoped').innerHTML = tabs() + '<div class="alert alert-err">' + icon('alertCircle') + '<div>' + esc(e.message) + '</div></div>'; bindTabs(); });
+    };
+
+    return render();
+  });
+}
+
+// --------------------------------------------------------------------------
+// SCANNER KIOS — panitia memindai Kartu QR peserta beruntun (tanpa antre)
+// --------------------------------------------------------------------------
+function beep(ok) {
+  try {
+    var C = window.AudioContext || window.webkitAudioContext; if (!C) return;
+    beep.ctx = beep.ctx || new C();
+    var o = beep.ctx.createOscillator(), g = beep.ctx.createGain();
+    o.frequency.value = ok ? 1150 : 320; o.type = 'sine';
+    g.gain.setValueAtTime(0.18, beep.ctx.currentTime); g.gain.exponentialRampToValueAtTime(0.001, beep.ctx.currentTime + (ok ? 0.12 : 0.3));
+    o.connect(g); g.connect(beep.ctx.destination); o.start(); o.stop(beep.ctx.currentTime + (ok ? 0.13 : 0.32));
+  } catch (e) {}
+}
+
+function pageAdminScanner(params, query, rid) {
+  return eventScoped('scanner', 'Pelaksanaan <span>/</span> <b>Scanner Kios</b>', 'Scanner Kios Absensi', 'Pindai Kartu QR peserta secara beruntun — setiap scan tampil instan, data dikirim per batch di latar.', rid, function (list, ev) {
+    return API.swr('listSesi', { eventId: ev.id }, function (sd) {
+      if (!Router.alive(rid) || $('#kios-root')) return;
+      if (!sd.sesi.length) { $('#scoped').innerHTML = '<div class="card">' + emptyState('qr', 'Belum ada sesi', 'Tambahkan sesi di menu Sesi & Absensi.') + '</div>'; return; }
+      var sesiId = query.sesi && sd.sesi.some(function (x) { return x.id === query.sesi; }) ? query.sesi : ((sd.sesi.filter(function (x) { return x.status === 'buka'; })[0] || sd.sesi[0]).id);
+      var qKey = 'kios_q_' + sesiId;
+      var queue = Store.get(qKey, []);
+      var roster = {}, rosterList = [], logItems = [], inflight = false, sendTimer = null, cooldown = {};
+      var stream = null, loop = null, detector = null;
+
+      $('#scoped').innerHTML = '<div id="kios-root" class="split" style="grid-template-columns:minmax(0,1fr) 360px"><div class="stack">' +
+        '<div class="card card-pad"><div class="row between wrap mb-16"><div class="field" style="min-width:220px"><label class="label">Sesi</label><select class="select" id="k-sesi">' +
+        sd.sesi.map(function (x) { return '<option value="' + esc(x.id) + '"' + (x.id === sesiId ? ' selected' : '') + '>' + esc(x.nama) + ' · ' + (x.status === 'buka' ? 'Dibuka' : 'Ditutup') + '</option>'; }).join('') + '</select></div>' +
+        '<div class="row wrap"><div class="center"><div class="kpi-value" id="k-hadir" style="margin:0">–</div><div class="xs muted">hadir</div></div><div class="center"><div class="kpi-value" id="k-q" style="margin:0;color:var(--warning)">' + queue.length + '</div><div class="xs muted">antrean kirim</div></div></div></div>' +
+        '<div class="scanner" id="k-scan" style="aspect-ratio:16/10"><video id="k-cam" playsinline muted autoplay hidden></video><canvas id="k-cv" hidden></canvas>' +
+        '<div class="scan-frame" id="k-frame" hidden><i></i><i></i><i></i><i></i><div class="scan-line"></div></div>' +
+        '<div class="scan-idle" id="k-idle"><div class="qr-ic">' + icon('idCard', 'ic-xl') + '</div><div class="bold" style="font-size:16px">Mode Kios Siap</div><p class="small" style="color:#adc8f5;margin-top:4px">Peserta cukup menunjukkan Kartu QR dari portal — pindai beruntun tanpa jeda.</p><button class="btn btn-light btn-lg mt-16" id="k-start">' + icon('camera', 'ic-sm') + ' Mulai Scanner</button></div>' +
+        '<div id="k-flash"></div><div class="scan-pill" id="k-pill" hidden><span class="pulse"></span> Memindai beruntun…</div></div>' +
+        '<div class="row wrap mt-16"><select class="select" id="k-camsel" style="flex:1 1 220px"><option value="">Kamera belakang (default)</option></select><button class="btn btn-secondary" id="k-stop" hidden>' + icon('x', 'ic-sm') + ' Matikan</button><button class="btn btn-secondary" id="k-full">' + icon('scan', 'ic-sm') + ' Layar Penuh</button></div></div>' +
+        '<div class="card card-pad stack-sm"><b>' + icon('keyboard', 'ic-sm') + ' Absen manual (peserta tanpa HP)</b><div class="input-icon">' + icon('search') + '<input class="input" id="k-find" placeholder="Ketik nama peserta…" autocomplete="off"></div><div id="k-found" class="stack-sm"></div></div>' +
+        '</div><aside class="card" style="position:sticky;top:80px"><div class="card-head"><div><h3>Riwayat Scan</h3><p class="small muted" id="k-net">Siap</p></div><button class="btn btn-ghost btn-sm" id="k-sync" title="Kirim sekarang">' + icon('refresh', 'ic-sm') + '</button></div><div class="kios-log" id="k-log"><p class="small muted" style="padding:14px">Belum ada scan.</p></div></aside></div>';
+
+      var setQ = function () { Store.set(qKey, queue); var el = $('#k-q'); if (el) el.textContent = queue.length; };
+      var hadirCount = function () { return rosterList.filter(function (p) { return p.hadir; }).length; };
+      var drawStats = function () { var el = $('#k-hadir'); if (el) el.textContent = hadirCount() + '/' + rosterList.length; };
+      var drawLog = function () {
+        var el = $('#k-log'); if (!el) return;
+        el.innerHTML = logItems.length ? logItems.slice(0, 60).map(function (l) {
+          var st = { kirim: badge('Mengirim', 'amber'), ok: badge('Tercatat', 'green', true), dup: badge('Sudah hadir', 'blue'), err: badge(l.pesan || 'Ditolak', 'red') }[l.st];
+          return '<div class="kios-row"><span class="avatar avatar-soft">' + esc(initials(l.nama)) + '</span><div class="grow" style="min-width:0"><div class="bold ellipsis">' + esc(l.nama) + '</div><div class="xs muted">' + esc(l.jam) + (l.manual ? ' · manual' : '') + '</div></div>' + st + '</div>';
+        }).join('') : '<p class="small muted" style="padding:14px">Belum ada scan.</p>';
+      };
+      var flash = function (kind, nama, sub) {
+        var el = $('#k-flash'); if (!el) return;
+        el.innerHTML = '<div class="kios-flash ' + kind + '">' + icon(kind === 'ok' ? 'checkCircle' : kind === 'dup' ? 'info' : 'xCircle', 'ic-xl') + '<div class="kn">' + esc(nama) + '</div><div class="small">' + esc(sub) + '</div></div>';
+        beep(kind === 'ok'); if (navigator.vibrate) navigator.vibrate(kind === 'ok' ? 60 : [60, 40, 60]);
+        clearTimeout(flash.t); flash.t = setTimeout(function () { if ($('#k-flash')) $('#k-flash').innerHTML = ''; }, kind === 'ok' ? 650 : 1200);
+      };
+      var nowStr = function () { var d = new Date(); var p = function (n) { return String(n).padStart(2, '0'); }; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds()); };
+
+      var enqueue = function (pid, payload, manual) {
+        var p = roster[pid];
+        var nama = p ? p.nama : 'Peserta ' + pid.slice(-5);
+        if (p && p.hadir) { flash('dup', nama, 'Sudah tercatat hadir ' + fmtTime(p.hadir)); logItems.unshift({ nama: nama, jam: new Date().toTimeString().slice(0, 5), st: 'dup', manual: manual }); drawLog(); return; }
+        if (!p) { flash('err', 'Tidak dikenal', 'Bukan peserta lolos event ini'); return; }
+        // Optimistic: tandai hadir seketika, kirim di latar
+        var item = { clientId: 'k' + Date.now() + Math.random().toString(36).slice(2, 6), waktu: nowStr(), nama: nama };
+        if (payload) item.payload = payload; else { item.pid = pid; item.manual = true; }
+        p.hadir = item.waktu;
+        queue.push(item); setQ();
+        logItems.unshift({ id: item.clientId, nama: nama, jam: item.waktu.slice(11, 16), st: 'kirim', manual: manual });
+        flash('ok', nama, p.institusi || 'Hadir');
+        drawStats(); drawLog();
+        scheduleSend(250);
+      };
+
+      var scheduleSend = function (ms) { clearTimeout(sendTimer); sendTimer = setTimeout(send, ms); };
+      var send = function () {
+        if (inflight || !queue.length || !Router.alive(rid)) return;
+        inflight = true;
+        var batch = queue.slice(0, 40);
+        $('#k-net').textContent = 'Mengirim ' + batch.length + ' data…';
+        API.call('absenBatch', { sesiId: sesiId, items: batch }, { noRedirect: true, timeout: 45000 }).then(function (res) {
+          var ids = {};
+          batch.forEach(function (b) { ids[b.clientId] = true; });
+          queue = Store.get(qKey, queue).filter(function (q) { return !ids[q.clientId]; }); setQ();
+          res.hasil.forEach(function (h) {
+            var l = logItems.filter(function (x) { return x.id === h.clientId; })[0];
+            if (l) { l.st = h.ok ? (h.sudah ? 'dup' : 'ok') : 'err'; l.pesan = h.pesan; }
+            if (!h.ok && roster[h.pid] && roster[h.pid].hadir && !h.sudah) roster[h.pid].hadir = '';
+          });
+          $('#k-net').textContent = 'Tersinkron ' + new Date().toTimeString().slice(0, 8);
+          drawLog(); drawStats();
+        }).catch(function (e) {
+          $('#k-net').textContent = e.network ? 'Offline — ' + queue.length + ' data menunggu' : 'Gagal: ' + e.message;
+          if (!e.network) toast(e.message, 'err');
+        }).then(function () { inflight = false; if (queue.length) scheduleSend(queue.length ? 1500 : 250); });
+      };
+
+      var loadRoster = function () {
+        return API.call('getRosterSesi', { sesiId: sesiId }).then(function (r) {
+          roster = {}; rosterList = r.peserta;
+          r.peserta.forEach(function (p) { roster[p.id] = p; });
+          queue.forEach(function (q) { var pid = q.pid || String(q.payload || '').split('|')[1]; if (roster[pid]) roster[pid].hadir = roster[pid].hadir || q.waktu; });
+          drawStats();
+        });
+      };
+
+      var tick = function () {
+        if (!stream) return;
+        var v = $('#k-cam'), c = $('#k-cv');
+        if (!v || v.readyState < 2) { loop = setTimeout(tick, 100); return; }
+        var handle = function (text) {
+          if (text) {
+            var m = String(text).match(/^SIMEVP\|([^|]+)\|/i);
+            if (m) {
+              if (!cooldown[m[1]] || Date.now() - cooldown[m[1]] > 3500) { cooldown[m[1]] = Date.now(); enqueue(m[1], text, false); }
+            } else if (/^SIMEV\|/i.test(text)) { if (!cooldown._s || Date.now() - cooldown._s > 3000) { cooldown._s = Date.now(); flash('err', 'QR Sesi', 'Minta peserta membuka Kartu QR di portal'); } }
+          }
+          loop = setTimeout(tick, text ? 350 : 80);
+        };
+        if (detector) detector.detect(v).then(function (codes) { handle(codes[0] && codes[0].rawValue); }).catch(function () { detector = null; handle(null); });
+        else if (window.jsQR) {
+          var side = Math.min(v.videoWidth, v.videoHeight) * 0.8, sx = (v.videoWidth - side) / 2, sy = (v.videoHeight - side) / 2, out = Math.min(520, side);
+          c.width = out; c.height = out;
+          var cx = c.getContext('2d', { willReadFrequently: true });
+          cx.drawImage(v, sx, sy, side, side, 0, 0, out, out);
+          var code = window.jsQR(cx.getImageData(0, 0, out, out).data, out, out, { inversionAttempts: 'attemptBoth' });
+          handle(code && code.data);
+        } else handle(null);
+      };
+      var start = function () {
+        var b = $('#k-start'); btnLoading(b, true, 'Membuka kamera…');
+        var det = ('BarcodeDetector' in window)
+          ? window.BarcodeDetector.getSupportedFormats().then(function (f) { return f.indexOf('qr_code') > -1 ? new window.BarcodeDetector({ formats: ['qr_code'] }) : loadScript('js/vendor/jsQR.js').then(function () { return null; }); }).catch(function () { return loadScript('js/vendor/jsQR.js').then(function () { return null; }); })
+          : loadScript('js/vendor/jsQR.js').then(function () { return null; });
+        var camId = Store.get('kios_cam', '');
+        Promise.all([det, navigator.mediaDevices.getUserMedia({ audio: false, video: camId ? { deviceId: { exact: camId } } : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } } })]).then(function (res) {
+          detector = res[0]; stream = res[1];
+          if (!Router.alive(rid) || !$('#k-cam')) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; return; }
+          var v = $('#k-cam'); v.srcObject = stream; v.hidden = false; v.play().catch(function () {});
+          $('#k-idle').hidden = true; $('#k-frame').hidden = false; $('#k-pill').hidden = false; $('#k-stop').hidden = false;
+          tick();
+          navigator.mediaDevices.enumerateDevices().then(function (devs) {
+            var cams = devs.filter(function (x) { return x.kind === 'videoinput'; }), tr = stream && stream.getVideoTracks()[0];
+            if ($('#k-camsel') && tr) $('#k-camsel').innerHTML = cams.map(function (cm, i) { return '<option value="' + esc(cm.deviceId) + '"' + (tr.getSettings().deviceId === cm.deviceId ? ' selected' : '') + '>' + esc(cm.label || 'Kamera ' + (i + 1)) + '</option>'; }).join('');
+          });
+        }).catch(function (e) { btnLoading(b, false); toast(e.name === 'NotReadableError' ? 'Kamera dipakai aplikasi lain.' : (e.message || 'Kamera tidak dapat dibuka.'), 'err', 6000); });
+      };
+      var stop = function () {
+        clearTimeout(loop);
+        if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+        stream = null;
+        if (!$('#k-cam')) return;
+        $('#k-cam').hidden = true; $('#k-idle').hidden = false; $('#k-frame').hidden = true; $('#k-pill').hidden = true; $('#k-stop').hidden = true;
+        btnLoading($('#k-start'), false);
+      };
+      Router.onLeave(function () { stop(); clearTimeout(sendTimer); });
+
+      on($('#k-start'), 'click', start);
+      on($('#k-stop'), 'click', stop);
+      on($('#k-full'), 'click', function () { var el = $('#k-scan'); if (el.requestFullscreen) el.requestFullscreen().catch(function () {}); });
+      on($('#k-camsel'), 'change', function () { Store.set('kios_cam', this.value); if (stream) { stop(); start(); } });
+      on($('#k-sesi'), 'change', function () { if (queue.length) return toast('Tunggu antrean terkirim sebelum pindah sesi.', 'warn'); Router.go('#/admin/scanner?sesi=' + encodeURIComponent(this.value)); });
+      on($('#k-sync'), 'click', function () { scheduleSend(0); loadRoster(); });
+      on($('#k-find'), 'input', debounce(function () {
+        var q = this.value.trim().toLowerCase();
+        $('#k-found').innerHTML = q.length < 2 ? '' : rosterList.filter(function (p) { return (p.nama + ' ' + p.institusi).toLowerCase().indexOf(q) > -1; }).slice(0, 6).map(function (p) {
+          return '<div class="row between" style="padding:6px 0;border-bottom:1px solid var(--border)"><div style="min-width:0"><div class="bold ellipsis">' + esc(p.nama) + '</div><div class="xs muted ellipsis">' + esc(p.institusi) + '</div></div>' +
+            (p.hadir ? badge('Hadir', 'green') : '<button class="btn btn-accent btn-xs" data-man="' + esc(p.id) + '">' + icon('check', 'ic-sm') + ' Hadir</button>') + '</div>';
+        }).join('') || '<p class="small muted">Tidak ditemukan.</p>';
+        $$('[data-man]').forEach(function (b) { on(b, 'click', function () { enqueue(b.dataset.man, null, true); b.outerHTML = badge('Hadir', 'green'); }); });
+      }, 120));
+
+      loadRoster().then(function () {
+        if (queue.length) scheduleSend(300);
+        if (navigator.permissions && navigator.permissions.query) navigator.permissions.query({ name: 'camera' }).then(function (p) { if (p.state === 'granted' && Router.alive(rid)) start(); }).catch(function () {});
+      }).catch(errToast);
+    }, { once: true });
   });
 }

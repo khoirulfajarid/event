@@ -164,26 +164,58 @@ var S = {
   token: Store.get('token', ''),
   user: Store.get('user', null),
   exp: Store.get('exp', 0),
+  pid: Store.get('pid', ''),        // registrasi (event) yang sedang dipilih member
   setSession: function (d) {
-    S.token = d.token; S.user = d.user; S.exp = d.kedaluwarsa || 0;
-    Store.set('token', S.token); Store.set('user', S.user); Store.set('exp', S.exp);
+    S.token = d.token; S.user = d.user; S.exp = d.kedaluwarsa || 0; S.pid = '';
+    Store.set('token', S.token); Store.set('user', S.user); Store.set('exp', S.exp); Store.del('pid');
+    if (d.deviceToken && d.user) Devices.save(d.user.email, d.user.nama, d.deviceToken);
   },
+  setPid: function (pid) { S.pid = pid || ''; Store.set('pid', S.pid); },
   clear: function () {
-    S.token = ''; S.user = null; S.exp = 0;
-    Store.del('token'); Store.del('user'); Store.del('exp');
+    S.token = ''; S.user = null; S.exp = 0; S.pid = '';
+    Store.del('token'); Store.del('user'); Store.del('exp'); Store.del('pid');
+    API.clearCache();
   },
   isAdmin: function () { return !!S.user && (S.user.role === 'OPERATOR' || S.user.role === 'PANITIA'); },
   isPeserta: function () { return !!S.user && (S.user.role === 'PESERTA' || S.user.role === 'CALON'); }
 };
-if (S.exp && S.exp < Date.now()) S.clear();
+if (S.exp && S.exp < Date.now()) { S.token = ''; S.user = null; Store.del('token'); Store.del('user'); Store.del('exp'); }
+
+/** Perangkat tepercaya: akun member yang pernah login di browser ini → login 1-tap tanpa kode. */
+var Devices = {
+  list: function () { return Store.get('devices', []); },
+  save: function (email, nama, token) {
+    var l = Devices.list().filter(function (x) { return x.email !== email; });
+    l.unshift({ email: email, nama: nama, token: token, t: Date.now() });
+    Store.set('devices', l.slice(0, 5));
+  },
+  remove: function (email) {
+    var dev = Devices.list().filter(function (x) { return x.email === email; })[0];
+    Store.set('devices', Devices.list().filter(function (x) { return x.email !== email; }));
+    if (dev) API.call('forgetDevice', { deviceToken: dev.token }, { noRedirect: true }).catch(function () {});
+  },
+  find: function (email) { email = String(email || '').toLowerCase().trim(); return Devices.list().filter(function (x) { return x.email === email; })[0]; },
+  login: function (dev) {
+    return API.call('loginDevice', { email: dev.email, deviceToken: dev.token }, { noRedirect: true })
+      .then(function (d) { S.setSession(d); return d; })
+      .catch(function (e) { if (e.code === 'NEED_KODE') Store.set('devices', Devices.list().filter(function (x) { return x.email !== dev.email; })); throw e; });
+  }
+};
 
 // --------------------------------------------------------------------------
-// API client
+// API client + cache SWR (stale-while-revalidate) → navigasi instan
 // --------------------------------------------------------------------------
+var READ_ACTIONS = {
+  ping: 1, publicConfig: 1, cekMember: 1, getPublicEvents: 1, getEventDetail: 1, verifyCertificate: 1, me: 1, pesertaStatus: 1,
+  adminDashboard: 1, listEvents: 1, listPendaftar: 1, getPendaftarDetail: 1, getFile: 1, listPembayaran: 1, listSesi: 1, getSesiQR: 1,
+  listAbsensi: 1, getRosterSesi: 1, listEvaluasi: 1, listSertifikat: 1, getCertAssets: 1, listLeads: 1, operatorOverview: 1,
+  getSettings: 1, listUsers: 1, listLog: 1
+};
 var API = {
   configured: function () { return CFG.GAS_URL && CFG.GAS_URL.indexOf('GANTI_DENGAN') === -1; },
+  _mem: {}, _inflight: {},
 
-  call: function (action, data, opt) {
+  raw: function (action, data, opt) {
     opt = opt || {};
     if (!API.configured()) return Promise.reject(new Error('GAS_URL belum diisi di js/config.js'));
     var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
@@ -192,7 +224,7 @@ var API = {
       method: 'POST',
       // WAJIB text/plain — application/json memicu preflight OPTIONS yang tidak dilayani GAS
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: action, data: data || {}, token: S.token || '' }),
+      body: JSON.stringify({ action: action, data: data || {}, token: S.token || '', pid: S.pid || '' }),
       redirect: 'follow',
       signal: ctrl ? ctrl.signal : undefined
     }).then(function (res) {
@@ -211,8 +243,11 @@ var API = {
         }
         throw err;
       }
-      if (json.message && opt.toast !== false && opt.toastOk) toast(json.message, 'ok');
-      return json.data !== undefined ? json.data : json;
+      if (!READ_ACTIONS[action]) {
+        // data berubah → buang cache baca (aset desain hanya dibuang jika desain yang berubah)
+        API.clearCache(/^(saveCertDesign|uploadCertAsset|saveEvent)$/.test(action) ? /^publicConfig\|/ : /^(publicConfig|getCertAssets)\|/);
+      }
+      return json;
     }).catch(function (err) {
       clearTimeout(timer);
       if (err.name === 'AbortError') err = new Error('Permintaan melebihi batas waktu. Periksa koneksi Anda.');
@@ -221,24 +256,82 @@ var API = {
     });
   },
 
-  /** Panggilan dengan pesan sukses dari server (return {data, message}) */
+  call: function (action, data, opt) {
+    return API.raw(action, data, opt).then(function (json) { return json.data !== undefined ? json.data : json; });
+  },
+
+  /** Panggilan aksi dengan pesan sukses dari server (return {data, message}) */
   act: function (action, data, opt) {
     opt = opt || {};
-    if (!API.configured()) return Promise.reject(new Error('GAS_URL belum diisi di js/config.js'));
-    return fetch(CFG.GAS_URL, {
-      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ action: action, data: data || {}, token: S.token || '' })
-    }).then(function (r) { return r.text(); }).then(function (txt) {
-      var json;
-      try { json = JSON.parse(txt); } catch (e) { throw new Error('Balasan server bukan JSON.'); }
-      if (!json.success) {
-        var err = new Error(json.message || 'Terjadi kesalahan.'); err.code = json.code;
-        if (json.code === 'AUTH') { S.clear(); Router.go('#/masuk'); }
-        throw err;
-      }
+    return API.raw(action, data, opt).then(function (json) {
       if (json.message && !opt.silent) toast(json.message, 'ok');
       return json;
-    }, function () { throw new Error('Tidak dapat terhubung ke server.'); });
+    });
+  },
+
+  key: function (action, data) { return action + '|' + JSON.stringify(data || {}) + '|' + (S.user ? S.user.id : '-') + '|' + (S.pid || ''); },
+  peek: function (k) {
+    var h = API._mem[k];
+    if (!h) { try { var raw = sessionStorage.getItem('swr:' + k); if (raw) { h = JSON.parse(raw); API._mem[k] = h; } } catch (e) {} }
+    return h;
+  },
+  store: function (k, d, str) {
+    var h = { s: str, d: d, t: Date.now() };
+    API._mem[k] = h;
+    try { if (str.length < 450000) sessionStorage.setItem('swr:' + k, JSON.stringify(h)); } catch (e) {}
+  },
+  clearCache: function (keep) {
+    Object.keys(API._mem).forEach(function (k) { if (!keep || !keep.test(k)) delete API._mem[k]; });
+    try {
+      Object.keys(sessionStorage).forEach(function (k) { if (k.indexOf('swr:') === 0 && (!keep || !keep.test(k.slice(4)))) sessionStorage.removeItem(k); });
+    } catch (e) {}
+  },
+  fresh: function (action, data, opt) {
+    var k = API.key(action, data);
+    if (API._inflight[k]) return API._inflight[k];
+    var p = API.call(action, data, opt).then(function (d) { delete API._inflight[k]; API.store(k, d, JSON.stringify(d)); return d; },
+      function (e) { delete API._inflight[k]; throw e; });
+    API._inflight[k] = p;
+    return p;
+  },
+  /**
+   * Stale-while-revalidate: tampilkan data cache SEKETIKA (0 ms), lalu segarkan di latar.
+   * onData(d, dariCache) dipanggil ulang hanya bila data server berbeda. opt.once = jangan render ulang.
+   */
+  swr: function (action, data, onData, opt) {
+    opt = opt || {};
+    var k = API.key(action, data), hit = API.peek(k);
+    var fresh = API.fresh(action, data, opt).then(function (d) {
+      if (!hit) onData(d, false);
+      else if (hit.s !== JSON.stringify(d) && !opt.once) onData(d, false);
+      return d;
+    });
+    if (hit) {
+      onData(hit.d, true);
+      fresh.catch(function (e) { if (e.network) toast('Mode offline — menampilkan data tersimpan.', 'warn', 2500); });
+      return Promise.resolve(hit.d);
+    }
+    return fresh;
+  },
+  /** SWR beberapa action sekaligus: onData(arrayHasil). */
+  swrAll: function (list, onData, opt) {
+    opt = opt || {};
+    var hits = list.map(function (x) { return API.peek(API.key(x[0], x[1])); });
+    var allHit = hits.every(function (h) { return !!h; });
+    var fresh = Promise.all(list.map(function (x) { return API.fresh(x[0], x[1], opt); })).then(function (res) {
+      var changed = !allHit || res.some(function (d, i) { return hits[i].s !== JSON.stringify(d); });
+      if (changed && !(allHit && opt.once)) onData(res, false);
+      return res;
+    });
+    if (allHit) { onData(hits.map(function (h) { return h.d; }), true); fresh.catch(function () {}); return Promise.resolve(); }
+    return fresh;
+  },
+  /** Muat di latar agar halaman berikutnya terbuka instan. */
+  prefetch: function (action, data) {
+    if (!S.token) return;
+    var h = API.peek(API.key(action, data));
+    if (h && Date.now() - h.t < 15000) return;
+    API.fresh(action, data, { noRedirect: true }).catch(function () {});
   }
 };
 
@@ -385,6 +478,30 @@ function prepareUpload(file) {
   });
 }
 
+/** Gambar desain (background/logo/TTD). format 'png' mempertahankan transparansi tanda tangan. */
+function prepareImage(file, opt) {
+  opt = opt || {};
+  if (!/^image\/(png|jpeg|webp)$/.test(file.type)) return Promise.reject(new Error('Gunakan gambar PNG, JPG, atau WEBP.'));
+  return new Promise(function (resolve, reject) {
+    var img = new Image(), url = URL.createObjectURL(file);
+    img.onload = function () {
+      var max = opt.max || 1600, scale = Math.min(1, max / Math.max(img.width, img.height));
+      var c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+      var ctx = c.getContext('2d');
+      if (opt.format !== 'png') { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height); }
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      var mime = opt.format === 'png' ? 'image/png' : 'image/jpeg';
+      var data = c.toDataURL(mime, 0.86), b64 = data.split(',')[1];
+      if (b64.length * 0.75 > 4.8 * 1024 * 1024) return reject(new Error('Gambar terlalu besar, gunakan resolusi lebih kecil.'));
+      resolve({ name: file.name.replace(/\.\w+$/, '') + (opt.format === 'png' ? '.png' : '.jpg'), mime: mime, base64: b64, dataUri: data });
+    };
+    img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('Gambar tidak dapat dibaca.')); };
+    img.src = url;
+  });
+}
+
 function b64ToBlob(b64, mime) {
   var bin = atob(b64), len = bin.length, arr = new Uint8Array(len);
   for (var i = 0; i < len; i++) arr[i] = bin.charCodeAt(i);
@@ -423,6 +540,15 @@ function previewFile(fileId, title) {
       : '<iframe class="preview-frame" src="' + url + '" title="' + esc(f.name) + '"></iframe>';
     m.body(inner + '<div class="row between mt-16"><span class="small muted ellipsis">' + esc(f.name) + '</span><a class="btn btn-secondary btn-sm" href="' + url + '" download="' + esc(f.name) + '">' + icon('download', 'ic-sm') + ' Unduh</a></div>');
   }).catch(function (e) { m.body('<div class="alert alert-err">' + icon('alertCircle') + '<div>' + esc(e.message) + '</div></div>'); });
+}
+
+/** QR code sebagai data URI GIF (aman untuk dirender ke PDF). */
+function qrDataUrl(text, cell) {
+  if (typeof qrcode === 'undefined') return '';
+  var q = qrcode(0, 'M');
+  q.addData(String(text));
+  q.make();
+  return q.createDataURL(cell || 6, 0);
 }
 
 /** QR code SVG (library qrcode-generator). */
@@ -501,7 +627,19 @@ var Router = {
       r.keys.forEach(function (k, j) { params[k] = decodeURIComponent(m[j + 1]); });
       var roles = r.opt.roles;
       if (roles) {
-        if (!S.user) { Store.set('after_login', hash); return Router.go('#/masuk'); }
+        if (!S.user) {
+          Store.set('after_login', hash);
+          var devs = Devices.list();
+          // Member dengan satu perangkat tepercaya → langsung masuk tanpa ketik apa pun
+          if (roles.indexOf('PESERTA') > -1 && devs.length === 1 && !Router._auto) {
+            Router._auto = true;
+            $('#app').innerHTML = '<div class="boot"><div class="center"><span class="spinner"></span><p class="small muted mt-8">Masuk sebagai ' + esc(devs[0].nama) + '…</p></div></div>';
+            Devices.login(devs[0]).then(function () { Router._auto = false; Store.del('after_login'); Router.resolve(); })
+              .catch(function () { Router._auto = false; Router.go('#/masuk'); });
+            return;
+          }
+          return Router.go('#/masuk');
+        }
         if (roles.indexOf(S.user.role) === -1) {
           if (S.isAdmin()) return Router.go('#/admin');
           if (S.isPeserta()) return Router.go('#/portal');
@@ -583,6 +721,7 @@ var Layout = {
       { key: 'leads', href: '#/admin/leads', ic: 'users', label: 'CRM Leads' },
       { group: 'Pelaksanaan' },
       { key: 'sesi', href: '#/admin/sesi', ic: 'qr', label: 'Sesi & Absensi' },
+      { key: 'scanner', href: '#/admin/scanner', ic: 'scan', label: 'Scanner Kios' },
       { key: 'evaluasi', href: '#/admin/evaluasi', ic: 'star', label: 'Evaluasi' },
       { key: 'sertifikat', href: '#/admin/sertifikat', ic: 'award', label: 'Sertifikat' }
     ];
@@ -599,14 +738,29 @@ var Layout = {
 
   pending: 0,
 
+  _shellKey: '',
+
   app: function (html, active, opt) {
     opt = opt || {};
     var u = S.user || {};
+    var key = u.id + '|' + u.role;
+    var topLeft = opt.search ? '<div class="input-icon" style="max-width:420px;flex:1">' + icon('search') + '<input class="input" id="top-search" placeholder="' + esc(opt.search) + '"></div>' : '<div class="grow small muted ellipsis">' + esc(opt.subtitle || '') + '</div>';
+
+    // Shell sudah ada → hanya ganti isi halaman (tanpa render ulang sidebar = instan, tanpa kedip)
+    if (Layout._shellKey === key && $('#sidebar') && $('#page')) {
+      $$('#sidebar .nav-item').forEach(function (a) { a.classList.toggle('active', a.dataset.key === active); });
+      $('#top-left').innerHTML = topLeft;
+      $('#page').innerHTML = html;
+      $('#sidebar').classList.remove('open'); $('#sb-backdrop').hidden = true;
+      Layout.refreshBadges();
+      return;
+    }
+    Layout._shellKey = key;
     var nav = Layout.navFor().map(function (it) {
       if (it.group) return '<div class="nav-group">' + esc(it.group) + '</div>';
-      return '<a class="nav-item ' + (active === it.key ? 'active' : '') + '" href="' + it.href + '">' + icon(it.ic) + '<span>' + esc(it.label) + '</span>' +
-        (it.lock ? '<span style="margin-left:auto">' + icon('lock', 'ic-sm') + '</span>' : '') +
-        (it.count ? '<span class="count">' + it.count + '</span>' : '') + '</a>';
+      return '<a class="nav-item ' + (active === it.key ? 'active' : '') + '" data-key="' + it.key + '" href="' + it.href + '">' + icon(it.ic) + '<span>' + esc(it.label) + '</span>' +
+        (it.lock ? '<span class="nav-lock" style="margin-left:auto">' + icon('lock', 'ic-sm') + '</span>' : '') +
+        (it.key === 'verifikasi' ? '<span class="count" id="nav-count"' + (Layout.pending ? '' : ' hidden') + '>' + Layout.pending + '</span>' : '') + '</a>';
     }).join('');
     var roleLabel = { OPERATOR: 'Operator', PANITIA: 'Panitia', PESERTA: 'Peserta', CALON: 'Calon Peserta' }[u.role] || '';
     $('#app').innerHTML =
@@ -615,9 +769,9 @@ var Layout = {
       nav + '</aside><div id="sb-backdrop" class="backdrop" hidden></div>' +
       '<div class="main"><header class="topbar">' +
       '<button class="btn btn-ghost btn-icon menu-btn" id="sb-toggle" aria-label="Menu">' + icon('menu') + '</button>' +
-      (opt.search ? '<div class="input-icon">' + icon('search') + '<input class="input" id="top-search" placeholder="' + esc(opt.search) + '"></div>' : '<div class="grow small muted ellipsis">' + esc(opt.subtitle || '') + '</div>') +
+      '<div id="top-left" class="grow row" style="min-width:0">' + topLeft + '</div>' +
       '<div class="row" style="margin-left:auto">' +
-      (S.isAdmin() ? '<a class="btn btn-ghost btn-icon" href="#/admin/verifikasi" title="Menunggu verifikasi" style="position:relative">' + icon('bell') + (Layout.pending ? '<span style="position:absolute;top:6px;right:6px;width:8px;height:8px;background:#f59e0b;border-radius:50%"></span>' : '') + '</a>' : '') +
+      (S.isAdmin() ? '<a class="btn btn-ghost btn-icon" href="#/admin/verifikasi" title="Menunggu verifikasi" style="position:relative">' + icon('bell') + '<span id="bell-dot" style="position:absolute;top:6px;right:6px;width:8px;height:8px;background:#f59e0b;border-radius:50%"' + (Layout.pending ? '' : ' hidden') + '></span></a>' : '') +
       '<div style="position:relative"><button class="avatar" id="user-btn" title="' + esc(u.nama) + '">' + esc(initials(u.nama)) + '</button>' +
       '<div class="dropdown" id="user-dd" hidden><div style="padding:8px 10px 10px"><div class="bold ellipsis">' + esc(u.nama) + '</div><div class="small muted ellipsis">' + esc(u.email) + '</div><div class="mt-8">' + badge(roleLabel, 'blue') + '</div></div><div class="divider" style="margin:4px 0"></div>' +
       (S.isAdmin() ? '<button id="dd-pass">' + icon('key') + ' Ganti Kata Sandi</button>' : '') +
@@ -631,12 +785,36 @@ var Layout = {
     document.onclick = function (e) { var dd = $('#user-dd'); if (dd && !e.target.closest('#user-dd')) dd.hidden = true; };
     on($('#dd-logout'), 'click', logout);
     on($('#dd-pass'), 'click', changePasswordModal);
+    // Prefetch saat kursor/jari menyentuh menu → halaman terbuka instan
+    $$('#sidebar .nav-item').forEach(function (a) {
+      var pf = function () { Layout.prefetchFor(a.dataset.key); };
+      on(a, 'mouseenter', pf); on(a, 'touchstart', pf);
+    });
+  },
+
+  refreshBadges: function () {
+    var c = $('#nav-count'), b = $('#bell-dot');
+    if (c) { c.textContent = Layout.pending; c.hidden = !Layout.pending; }
+    if (b) b.hidden = !Layout.pending;
+  },
+
+  prefetchFor: function (key) {
+    if (!S.isAdmin()) return;
+    var ev = Store.get('ctx_event', '');
+    var map = {
+      dashboard: [['adminDashboard', { eventId: '' }]], events: [['listEvents', {}]], leads: [['listLeads', {}]],
+      verifikasi: [['listPendaftar', { eventId: ev }]], pembayaran: [['listPembayaran', { eventId: ev }]],
+      sesi: [['listSesi', { eventId: ev }], ['listAbsensi', { eventId: ev }]], evaluasi: [['listEvaluasi', { eventId: ev }]],
+      sertifikat: [['listSertifikat', { eventId: ev }]], operator: [['operatorOverview', {}], ['listUsers', {}]], akun: [['listUsers', {}]], log: [['listLog', { limit: 500 }]]
+    };
+    (map[key] || []).forEach(function (x) { if (x[1].eventId !== undefined && x[1].eventId === '' && key !== 'dashboard') return; API.prefetch(x[0], x[1]); });
   }
 };
 
 function logout() {
   API.call('logout', {}, { noRedirect: true }).catch(function () {});
   S.clear();
+  Layout._shellKey = '';
   toast('Anda telah keluar.', 'ok');
   Router.go('#/masuk');
 }
@@ -661,12 +839,16 @@ function changePasswordModal() {
 /** Pemilih event aktif untuk halaman admin (disimpan di localStorage). */
 var EventCtx = {
   list: null,
-  load: function (force) {
-    if (EventCtx.list && !force) return Promise.resolve(EventCtx.list);
-    return API.call('listEvents').then(function (d) {
-      EventCtx.list = d.events;
-      Layout.pending = d.events.reduce(function (a, e) { return a + (e.stat ? e.stat.menunggu : 0); }, 0);
-      return d.events;
+  /** Daftar event dari cache SWR: seketika jika pernah dimuat, segar di latar. */
+  load: function () {
+    return new Promise(function (resolve, reject) {
+      var done = false;
+      API.swr('listEvents', {}, function (d) {
+        EventCtx.list = d.events;
+        Layout.pending = d.events.reduce(function (a, e) { return a + (e.stat ? e.stat.menunggu : 0); }, 0);
+        Layout.refreshBadges();
+        if (!done) { done = true; resolve(d.events); }
+      }).catch(function (e) { if (!done) reject(e); });
     });
   },
   currentId: function (list) {
